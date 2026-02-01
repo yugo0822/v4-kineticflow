@@ -7,7 +7,11 @@ import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {PoolManager} from "@uniswap/v4-core/src/PoolManager.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {PositionManager} from "@uniswap/v4-periphery/src/PositionManager.sol";
+import {IPositionDescriptor} from "@uniswap/v4-periphery/src/interfaces/IPositionDescriptor.sol";
+import {IWETH9} from "@uniswap/v4-periphery/src/interfaces/external/IWETH9.sol";
 
 import {IUniswapV4Router04} from "hookmate/interfaces/router/IUniswapV4Router04.sol";
 import {AddressConstants} from "hookmate/constants/AddressConstants.sol";
@@ -39,10 +43,11 @@ abstract contract Deployers {
         token.mint(address(this), 10_000_000 ether);
 
         token.approve(address(permit2), type(uint256).max);
+        token.approve(address(positionManager), type(uint256).max);
         token.approve(address(swapRouter), type(uint256).max);
 
         permit2.approve(address(token), address(positionManager), type(uint160).max, type(uint48).max);
-        permit2.approve(address(token), address(poolManager), type(uint160).max, type(uint48).max);
+        permit2.approve(address(token), address(swapRouter), type(uint160).max, type(uint48).max);
     }
 
     function deployCurrencyPair() internal virtual returns (Currency currency0, Currency currency1) {
@@ -58,20 +63,27 @@ abstract contract Deployers {
     }
 
     function deployPermit2() internal {
-        address permit2Address = AddressConstants.getPermit2Address();
-
-        if (permit2Address.code.length > 0) {
-            // Permit2 is already deployed, no need to etch it.
+        // Always deploy a fresh Permit2 for local testing to ensure it exists and has code
+        if (block.chainid == 31337) {
+            bytes memory bytecode = Permit2Deployer.initcode();
+            address p2;
+            assembly {
+                p2 := create(0, add(bytecode, 0x20), mload(bytecode))
+            }
+            require(p2 != address(0), "Permit2 deployment failed");
+            permit2 = IPermit2(p2);
         } else {
-            _etch(permit2Address, Permit2Deployer.deploy().code);
+            address permit2Address = AddressConstants.getPermit2Address();
+            if (permit2Address.code.length == 0) {
+                _etch(permit2Address, Permit2Deployer.deploy().code);
+            }
+            permit2 = IPermit2(permit2Address);
         }
-
-        permit2 = IPermit2(permit2Address);
     }
 
     function deployPoolManager() internal virtual {
         if (block.chainid == 31337) {
-            poolManager = IPoolManager(V4PoolManagerDeployer.deploy(address(0x4444)));
+            poolManager = IPoolManager(address(new PoolManager(msg.sender)));
         } else {
             poolManager = IPoolManager(AddressConstants.getPoolManagerAddress(block.chainid));
         }
@@ -79,11 +91,10 @@ abstract contract Deployers {
 
     function deployPositionManager() internal virtual {
         if (block.chainid == 31337) {
-            positionManager = IPositionManager(
-                V4PositionManagerDeployer.deploy(
-                    address(poolManager), address(permit2), 300_000, address(0), address(0)
-                )
-            );
+            // Deploy WETH mock
+            MockERC20 weth = new MockERC20("WETH", "WETH", 18);
+
+            positionManager = IPositionManager(address(new PositionManager(poolManager, permit2, 300_000, IPositionDescriptor(address(0)), IWETH9(address(weth)))));
         } else {
             positionManager = IPositionManager(AddressConstants.getPositionManagerAddress(block.chainid));
         }
@@ -91,7 +102,18 @@ abstract contract Deployers {
 
     function deployRouter() internal virtual {
         if (block.chainid == 31337) {
-            swapRouter = IUniswapV4Router04(payable(V4RouterDeployer.deploy(address(poolManager), address(permit2))));
+            // Use deployCode to deploy V4Router using the artifact wrapper logic
+            bytes memory args = abi.encode(address(poolManager), address(permit2));
+            bytes memory bytecode = abi.encodePacked(V4RouterDeployer.initcode(), args);
+            
+            // We need to use assembly to deploy since we have bytecode
+            address router;
+            assembly {
+                router := create(0, add(bytecode, 0x20), mload(bytecode))
+            }
+            require(router != address(0), "Router deployment failed");
+            
+            swapRouter = IUniswapV4Router04(payable(router));
         } else {
             swapRouter = IUniswapV4Router04(payable(AddressConstants.getV4SwapRouterAddress(block.chainid)));
         }

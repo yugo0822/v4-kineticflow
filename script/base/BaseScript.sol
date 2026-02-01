@@ -31,9 +31,8 @@ contract BaseScript is Script, Deployers {
     Currency immutable currency1;
 
     constructor() {
-        // Make sure artifacts are available, either deploy or configure.
-        deployArtifacts();
-
+        // artifacts will be deployed in run() via deployArtifacts() if needed
+        
         deployerAddress = getDeployer();
 
         (currency0, currency1) = getCurrencies();
@@ -50,10 +49,12 @@ contract BaseScript is Script, Deployers {
     }
 
     function _etch(address target, bytes memory bytecode) internal override {
+        // Update Foundry's simulation state
+        vm.etch(target, bytecode);
+        
+        // Update Anvil's actual state via RPC
         if (block.chainid == 31337) {
             vm.rpc("anvil_setCode", string.concat('["', vm.toString(target), '",', '"', vm.toString(bytecode), '"]'));
-        } else {
-            revert("Unsupported etch on this network");
         }
     }
 

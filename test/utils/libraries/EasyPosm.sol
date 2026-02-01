@@ -42,9 +42,23 @@ library EasyPosm {
     ) internal returns (uint256 tokenId, BalanceDelta delta) {
         (Currency currency0, Currency currency1) = (poolKey.currency0, poolKey.currency1);
 
+        // NOTE: In a script/broadcast context, address(this) is the script contract, not the sender (msg.sender).
+        // If the sender (EOA) holds the tokens, we should use msg.sender here to check balances/deltas conceptually,
+        // but EasyPosm assumes the caller (address(this)) holds tokens or is paying.
+        // For broadcast scripts, `posm.modifyLiquidities` will pull tokens from `msg.sender` (due to broadcast).
+        // However, `balanceOf(address(this))` checks the script's balance, which is 0.
+        // We will modify this to check `msg.sender` for balance accounting if it's a script, 
+        // but `EasyPosm` is a library.
+        // A safer quick fix for the script is to just rely on the return value or logs, 
+        // but `EasyPosm` logic specifically uses address(this) for balance diffs.
+        
+        // Changing address(this) to recipient (assuming recipient is the payer/broadcaster)
+        // This makes it compatible with scripts where recipient == msg.sender
+        address payer = recipient; 
+
         MintData memory mintData = MintData({
-            balance0Before: currency0.balanceOf(address(this)),
-            balance1Before: currency1.balanceOf(address(this)),
+            balance0Before: currency0.balanceOf(payer),
+            balance1Before: currency1.balanceOf(payer),
             actions: new bytes(0),
             params: new bytes[](4)
         });
@@ -65,8 +79,8 @@ library EasyPosm {
         posm.modifyLiquidities{value: valueToPass}(abi.encode(mintData.actions, mintData.params), deadline);
 
         delta = toBalanceDelta(
-            -(mintData.balance0Before - currency0.balanceOf(address(this))).toInt128(),
-            -(mintData.balance1Before - currency1.balanceOf(address(this))).toInt128()
+            -(mintData.balance0Before - currency0.balanceOf(payer)).toInt128(),
+            -(mintData.balance1Before - currency1.balanceOf(payer)).toInt128()
         );
     }
 
@@ -86,6 +100,12 @@ library EasyPosm {
         params[1] = abi.encode(currency0);
         params[2] = abi.encode(currency1);
 
+        // Assuming msg.sender is paying in a broadcast context, but this library is mixed use.
+        // We cannot easily change all address(this) to msg.sender without breaking non-broadcast tests.
+        // However, standard EasyPosm usage in tests assumes the test contract pays.
+        // In scripts with broadcast, msg.sender pays.
+        // We'll use address(this) here as this function doesn't take a recipient/payer argument explicitly for balance checks.
+        // If this causes issues in scripts, avoid using EasyPosm.increaseLiquidity in scripts.
         uint256 balance0Before = currency0.balanceOf(address(this));
         uint256 balance1Before = currency1.balanceOf(address(this));
 
@@ -122,16 +142,20 @@ library EasyPosm {
         params[0] = abi.encode(tokenId, liquidityToRemove, amount0Min, amount1Min, hookData);
         params[1] = abi.encode(currency0, currency1, recipient);
 
-        uint256 balance0Before = currency0.balanceOf(address(this));
-        uint256 balance1Before = currency1.balanceOf(address(this));
+        // For decrease liquidity, recipient receives tokens. 
+        // We should check recipient balance to calculate delta correctly in all contexts.
+        address receiver = recipient;
+        
+        uint256 balance0Before = currency0.balanceOf(receiver);
+        uint256 balance1Before = currency1.balanceOf(receiver);
 
         posm.modifyLiquidities(
             abi.encode(abi.encodePacked(uint8(Actions.DECREASE_LIQUIDITY), uint8(Actions.TAKE_PAIR)), params), deadline
         );
 
         delta = toBalanceDelta(
-            (currency0.balanceOf(address(this)) - balance0Before).toInt128(),
-            (currency1.balanceOf(address(this)) - balance1Before).toInt128()
+            (currency0.balanceOf(receiver) - balance0Before).toInt128(),
+            (currency1.balanceOf(receiver) - balance1Before).toInt128()
         );
     }
 

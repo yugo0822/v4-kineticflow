@@ -1,0 +1,4 @@
+あなたはSolidityおよびFoundryの専門家です。
+このプロジェクトはUniswap v4 Hooksの開発プロジェクトです。
+ライブラリは lib/ フォルダに Gitサブモジュールとしてインストールされています。
+コードを生成する際は、OpenZeppelinの uniswap-hooks や v4-core のインターフェースを遵守してください。

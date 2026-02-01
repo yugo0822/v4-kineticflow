@@ -57,7 +57,7 @@ contract CounterTest is BaseTest {
         hook = Counter(flags);
 
         // Create the pool
-        poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(hook));
+        poolKey = PoolKey(currency0, currency1, 3000, 60, IHooks(address(hook)));
         poolId = poolKey.toId();
         poolManager.initialize(poolKey, Constants.SQRT_PRICE_1_1);
 
@@ -74,8 +74,9 @@ contract CounterTest is BaseTest {
             liquidityAmount
         );
 
+        PoolKey memory key = poolKey;
         (tokenId,) = positionManager.mint(
-            poolKey,
+            key,
             tickLower,
             tickUpper,
             liquidityAmount,
