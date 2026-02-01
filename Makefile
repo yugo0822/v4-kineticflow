@@ -1,5 +1,5 @@
 # Variable definitions
-IMAGE_NAME = v4-mppi-dashboard
+IMAGE_NAME = v4-dashboard
 CONTAINER_NAME = v4-mppi-run
 
 # Deployment settings
