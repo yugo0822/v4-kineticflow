@@ -1,0 +1,20 @@
+# --- Web3 & Blockchain ---
+web3>=6.0.0             # Base Sepoliaとの通信、PoolManagerのデータ取得
+eth-account             # 秘密鍵管理とトランザクション署名
+
+# --- External Market Data ---
+ccxt>=4.0.0             # Binance等のCEXから外部市場価格を取得
+
+# --- UI & Visualization ---
+streamlit>=1.30.0       # リアルタイムダッシュボード作成
+streamlit-autorefresh   # グラフを自動更新するために必要
+plotly                  # インタラクティブで綺麗なグラフ（MPPIのパス表示に最適）
+
+# --- Math & Control Theory (MPPI) ---
+numpy>=1.24.0           # 行列演算、MPPIのベクトル化計算
+scipy                   # 統計計算や最適化
+pandas                  # 価格履歴データの管理
+
+# --- Utilities ---
+python-dotenv           # .envファイルからRPC URLや秘密鍵を読み込む
+requests                # 一般的なAPIリクエスト用
