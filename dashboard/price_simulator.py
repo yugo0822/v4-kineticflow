@@ -203,14 +203,7 @@ class PriceSimulator:
         step = 0
         
         while True:
-            try:
-                # Display current price
-                try:
-                    current_price_display = self.get_current_price()
-                    print(f"[Current Price] ${current_price_display:.2f}", flush=True)
-                except Exception as e:
-                    print(f"[Current Price] Error: {e}", flush=True)
-                
+            try:              
                 # Calculate new price based on scenario
                 if scenario == "volatile":
                     # Extreme fluctuations: ±5% random walk + occasional spikes
@@ -292,6 +285,7 @@ if __name__ == "__main__":
                         help="Update interval in seconds")
     
     args = parser.parse_args()
+    
     
     simulator = PriceSimulator()
     simulator.run_scenario(

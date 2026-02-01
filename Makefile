@@ -46,7 +46,7 @@ shell:
 	docker exec -it $(CONTAINER_NAME) /bin/bash
 
 # Rebuild and restart container
-re: stop build run logs
+re: stop build run 
 
 # ============================================
 # Anvil Commands
