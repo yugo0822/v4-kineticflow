@@ -14,6 +14,8 @@ plotly                  # インタラクティブで綺麗なグラフ（MPPI�
 numpy>=1.24.0           # 行列演算、MPPIのベクトル化計算
 scipy                   # 統計計算や最適化
 pandas                  # 価格履歴データの管理
+torch>=2.2,<3           # MPPI controller (dashboard/optimizer/controller.py)
+# NOTE (Linux CPU-only): `pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt`
 
 # --- Utilities ---
 python-dotenv           # .envファイルからRPC URLや秘密鍵を読み込む
