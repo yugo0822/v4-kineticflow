@@ -25,8 +25,6 @@ load_dotenv()
 class PriceSimulator:
     def __init__(self):
         self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
-        print(f"Price Simulator: Connecting to RPC: {self.rpc_url}", flush=True)
-        
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         # Check RPC connection
@@ -96,18 +94,14 @@ class PriceSimulator:
         
         # Get oracle address
         self.oracle_address = CONTRACTS.get('oracle')
-        print(f"Price Simulator: Oracle address from config: {self.oracle_address}", flush=True)
-        print(f"Price Simulator: All CONTRACTS: {CONTRACTS}", flush=True)
-        
-        if not self.oracle_address or self.oracle_address == "0x0000000000000000000000000000000000000000":
-            raise ValueError("Oracle address not found in CONTRACTS. Deploy MockV3Aggregator first.")
-        
+        if not self.oracle_address:
+            raise ValueError("Oracle address not found in CONTRACTS.")
+
         self.oracle = self.w3.eth.contract(
             address=self.w3.to_checksum_address(self.oracle_address),
             abi=self.aggregator_abi
         )
-        print("Waiting for contracts to be ready...", flush=True)
-        time.sleep(5)
+
         # Get decimals
         self.decimals = self.oracle.functions.decimals().call()
         
@@ -124,6 +118,15 @@ class PriceSimulator:
                 print("Price Simulator: Owner check PASSED - can update prices", flush=True)
         except Exception as e:
             print(f"Price Simulator: Error checking owner: {e}", flush=True)
+
+        # =======================
+        # Volatility model params
+        # =======================
+        self.base_vol = float(os.getenv("PRICE_VOLATILITY", "0.02"))
+        self.current_vol = self.base_vol
+        self.vol_persistence = 0.95
+        self.last_return = 0.0
+        self.momentum = 0.2
     
     def get_current_price(self) -> float:
         """Get current price (human-readable format)"""
@@ -178,8 +181,62 @@ class PriceSimulator:
                 time.sleep(0.5)
         
         return False
+
+    def _generate_market_return(self, scenario, step, base_price, current_price):
+        """
+        GARCH + Jump-Diffusion モデルに基づく次ステップの収益率計算
+        """
+        # 1. ボラティリティ・クラスタリング (GARCH-like update)
+        # 前回の変動幅が大きいと、次回のボラティリティも上がる
+        shock = abs(self.last_return)
+        self.current_vol = (self.vol_persistence * self.current_vol + 
+                           (1 - self.vol_persistence) * self.base_vol + 
+                           0.1 * shock)
+        
+        # ボラティリティが死なないように（かつ爆発しないように）制限
+        self.current_vol = max(self.base_vol * 0.3, min(self.base_vol * 10, self.current_vol))
+
+        # 2. シナリオ別ロジック
+        change = 0.0
+        
+        if scenario in ["volatile", "extreme"]:
+            # 拡散項 (Normal diffusion)
+            mult = 2.5 if scenario == "extreme" else 1.0
+            change = random.gauss(0, self.current_vol * mult)
+            
+            # 跳躍項 (Jump: 突発的な大きなニュースやクジラの売り買い)
+            jump_chance = 0.15 if scenario == "extreme" else 0.05
+            if random.random() < jump_chance:
+                jump = random.gauss(0, self.base_vol * 5)
+                change += jump
+                print(f"   >>> MARKET JUMP: {jump:+.2%}")
+
+        elif scenario == "crash":
+            # 徐々に下がるトレンド + 恐怖によるボラティリティ増大
+            drift = -0.005
+            change = drift + random.gauss(0, self.current_vol * 1.5)
+
+        elif scenario == "pump":
+            # 強気相場
+            drift = 0.005
+            change = drift + random.gauss(0, self.current_vol * 1.5)
+
+        elif scenario == "sine":
+            # 周期的な動き（ただしノイズ多め）
+            target = base_price * (1 + 0.15 * math.sin(2 * math.pi * step / 100))
+            change = (target / current_price - 1) + random.gauss(0, self.base_vol * 0.5)
+
+        else: # random_walk
+            change = random.gauss(0, self.base_vol)
+
+        # 3. モメンタム (トレンドの継続性)
+        change = change + (self.last_return * self.momentum)
+        
+        # キャッシュして返す
+        self.last_return = change
+        return change
     
-    def run_scenario(self, scenario: str = "volatile", base_price: float = 1.0, interval: float = 3.0):
+    def run_scenario(self, scenario: str = "volatile", base_price: float = 2500.0, interval: float = 3.0):
         """
         Execute price scenario
         
@@ -192,10 +249,7 @@ class PriceSimulator:
         """
         print("=" * 60, flush=True)
         print(f"Price Simulator starting...", flush=True)
-        print(f"Oracle: {self.oracle_address}", flush=True)
-        print(f"Account: {self.account.address}", flush=True)
         print(f"Scenario: {scenario}", flush=True)
-        print(f"Base price: ${base_price:.2f}", flush=True)
         print(f"Update interval: {interval}s", flush=True)
         print("=" * 60, flush=True)
         
@@ -203,86 +257,33 @@ class PriceSimulator:
         step = 0
         
         while True:
-            try:              
-                # Calculate new price based on scenario
-                if scenario == "volatile":
-                    # Extreme fluctuations: ±5% random walk + occasional spikes
-                    change = random.gauss(0, 0.03)  # 3% standard deviation
-                    if random.random() < 0.1:  # 10% chance of spike
-                        change += random.choice([-0.05, 0.05])  # ±5% spike
-                    current_price = current_price * (1 + change)
-                    
-                elif scenario == "crash":
-                    # Crash: gradual decline
-                    change = -0.01 + random.gauss(0, 0.005)  # -1% + noise
-                    current_price = current_price * (1 + change)
-                    # Set minimum price (down to -50%)
-                    current_price = max(current_price, base_price * 0.5)
-                    
-                elif scenario == "pump":
-                    # Pump: gradual rise
-                    change = 0.01 + random.gauss(0, 0.005)  # +1% + noise
-                    current_price = current_price * (1 + change)
-                    # Set maximum price (up to +50%)
-                    current_price = min(current_price, base_price * 1.5)
-                    
-                elif scenario == "sine":
-                    # Sine wave: periodic fluctuations
-                    amplitude = 0.1  # ±10%
-                    period = 60  # 1 cycle in 60 steps
-                    current_price = base_price * (1 + amplitude * math.sin(2 * math.pi * step / period))
-                    
-                elif scenario == "random_walk":
-                    # Random walk: ±2%
-                    change = random.gauss(0, 0.02)
-                    current_price = current_price * (1 + change)
-                    
-                elif scenario == "extreme":
-                    # Extreme fluctuations: ±10% random walk + frequent spikes
-                    change = random.gauss(0, 0.05)  # 5% standard deviation
-                    if random.random() < 0.2:  # 20% chance of spike
-                        change += random.choice([-0.1, 0.1])  # ±10% spike
-                    current_price = current_price * (1 + change)
-                    
-                else:
-                    print(f"Unknown scenario: {scenario}. Using random_walk.", flush=True)
-                    change = random.gauss(0, 0.02)
-                    current_price = current_price * (1 + change)
+            try:
+                ret = self._generate_market_return(scenario, step, base_price, current_price)
+                current_price *= (1 + ret)
+                current_price = max(current_price, base_price * 0.1) # 0にはならない
                 
-                # Ensure price doesn't go below 0
-                current_price = max(current_price, 1.0)
-                
-                # Update price
                 success = self.update_price(current_price)
                 
                 if success:
-                    price_change = ((current_price / base_price) - 1) * 100
-                    print(f"[{step:04d}] Price: ${current_price:.2f} ({price_change:+.2f}% from base)", flush=True)
-                else:
-                    print(f"[{step:04d}] Failed to update price", flush=True)
+                    diff = ((current_price / base_price) - 1) * 100
+                    print(f"[{step:04d}] Price: ${current_price:,.2f} ({diff:+.2f}%) | σ_curr: {self.current_vol:.2%}")
                 
                 step += 1
                 time.sleep(interval)
-                
             except KeyboardInterrupt:
-                print("\nPrice Simulator stopped.", flush=True)
+                print("\nSimulator stopped.")
                 break
             except Exception as e:
-                print(f"Error in simulation loop: {e}", flush=True)
+                print(f"Loop error: {e}")
                 time.sleep(interval)
 
 
 if __name__ == "__main__":
     import argparse
-    
     parser = argparse.ArgumentParser(description="Price Simulator for MockV3Aggregator")
-    parser.add_argument("--scenario", type=str, default="volatile",
-                        choices=["volatile", "crash", "pump", "sine", "random_walk", "extreme"],
-                        help="Price scenario to run")
-    parser.add_argument("--base-price", type=float, default=2500.0,
-                        help="Base price in USD")
-    parser.add_argument("--interval", type=float, default=3.0,
-                        help="Update interval in seconds")
+    parser.add_argument("--scenario", type=str, default="volatile", choices=["volatile", "crash", "pump", "sine", "random_walk", "extreme"])
+    parser.add_argument("--base-price", type=float, default=2500.0)
+    parser.add_argument("--interval", type=float, default=3.0)
     
     args = parser.parse_args()
     
