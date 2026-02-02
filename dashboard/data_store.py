@@ -21,19 +21,38 @@ class DataStore:
                     diff_ratio REAL
                 )
             """)
-            try:
-                conn.execute("ALTER TABLE price_history ADD COLUMN diff_ratio REAL")
-            except sqlite3.OperationalError:
-                pass
+            # Add new columns if they don't exist
+            for col in ['diff_ratio', 'tick_lower', 'tick_upper', 'price_lower', 'price_upper']:
+                try:
+                    conn.execute(f"ALTER TABLE price_history ADD COLUMN {col} REAL")
+                except sqlite3.OperationalError:
+                    pass
 
     def append_data(self, data_dict):
         with self._lock:
             with sqlite3.connect(self.db_path) as conn:
                 diff_ratio = data_dict.get('diff_ratio', 0)
-                conn.execute("INSERT INTO price_history VALUES (?, ?, ?, ?, ?, ?)", 
-                            (data_dict['timestamp'], data_dict['pool_price'], 
-                             data_dict['external_price'], data_dict['tick'], 
-                             data_dict['diff'], diff_ratio))
+                tick_lower = data_dict.get('tick_lower', None)
+                tick_upper = data_dict.get('tick_upper', None)
+                price_lower = data_dict.get('price_lower', None)
+                price_upper = data_dict.get('price_upper', None)
+                
+                conn.execute("""
+                    INSERT INTO price_history 
+                    (timestamp, pool_price, external_price, tick, diff, diff_ratio, tick_lower, tick_upper, price_lower, price_upper)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    data_dict['timestamp'], 
+                    data_dict['pool_price'], 
+                    data_dict['external_price'], 
+                    data_dict['tick'], 
+                    data_dict['diff'], 
+                    diff_ratio,
+                    tick_lower,
+                    tick_upper,
+                    price_lower,
+                    price_upper
+                ))
 
     def get_volatility(self, window=20):
         """Calculate volatility from recent price data"""

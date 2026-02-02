@@ -137,6 +137,28 @@ with col4:
         delta_color=status_color if abs(diff_ratio_pct) > rebalance_threshold else "off"
     )
 
+# Display liquidity range information
+if 'tick_lower' in last_row and 'tick_upper' in last_row and pd.notna(last_row['tick_lower']) and pd.notna(last_row['tick_upper']):
+    tick_lower = int(last_row['tick_lower'])
+    tick_upper = int(last_row['tick_upper'])
+    price_lower = last_row.get('price_lower', 0)
+    price_upper = last_row.get('price_upper', 0)
+    current_tick = int(last_row.get('tick', 0))
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Lower Tick", f"{tick_lower}", help=f"Price: ${price_lower:.4f}" if price_lower > 0 else "")
+    with col2:
+        st.metric("Current Tick", f"{current_tick}")
+    with col3:
+        st.metric("Upper Tick", f"{tick_upper}", help=f"Price: ${price_upper:.4f}" if price_upper > 0 else "")
+    
+    # Check if current price is in range
+    if price_lower > 0 and price_upper > 0:
+        in_range = price_lower <= last_pool_price <= price_upper
+        range_status = "✓ In Range" if in_range else "⚠️ Out of Range"
+        st.info(f"Liquidity Range: [${price_lower:.4f}, ${price_upper:.4f}] | {range_status}")
+
 st.subheader("Real-time Price History")
 
 fig = go.Figure()
@@ -152,6 +174,30 @@ fig.add_trace(go.Scatter(
     y=df['external_price'],
     mode='lines', name='External Price (Historical)', line=dict(color='lime', width=2, dash='dot')
 ))
+
+# Add liquidity range lines if available
+if 'price_lower' in df.columns and 'price_upper' in df.columns:
+    latest_price_lower = df['price_lower'].iloc[-1] if pd.notna(df['price_lower'].iloc[-1]) else None
+    latest_price_upper = df['price_upper'].iloc[-1] if pd.notna(df['price_upper'].iloc[-1]) else None
+    
+    if latest_price_lower and latest_price_upper:
+        latest_timestamp = df['timestamp'].max()
+        fig.add_trace(go.Scatter(
+            x=[pd.to_datetime(df['timestamp'].min(), unit='s'), pd.to_datetime(df['timestamp'].max(), unit='s')],
+            y=[latest_price_lower, latest_price_lower],
+            mode='lines',
+            name='Lower Tick Price',
+            line=dict(color='red', width=1, dash='dash'),
+            opacity=0.5
+        ))
+        fig.add_trace(go.Scatter(
+            x=[pd.to_datetime(df['timestamp'].min(), unit='s'), pd.to_datetime(df['timestamp'].max(), unit='s')],
+            y=[latest_price_upper, latest_price_upper],
+            mode='lines',
+            name='Upper Tick Price',
+            line=dict(color='red', width=1, dash='dash'),
+            opacity=0.5
+        ))
 
 if use_live_price and live_external_price is not None:
     latest_timestamp = df['timestamp'].max()

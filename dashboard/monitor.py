@@ -30,6 +30,53 @@ class MarketMonitor:
             abi=self.pool_manager_abi
         )
         
+        # PositionManager setup for getting position info
+        self.position_manager_address = CONTRACTS.get('position_manager')
+        if self.position_manager_address:
+            self.position_manager_abi = [
+                {
+                    "inputs": [{"internalType": "uint256", "name": "tokenId", "type": "uint256"}],
+                    "name": "getPoolAndPositionInfo",
+                    "outputs": [
+                        {
+                            "components": [
+                                {"internalType": "address", "name": "currency0", "type": "address"},
+                                {"internalType": "address", "name": "currency1", "type": "address"},
+                                {"internalType": "uint24", "name": "fee", "type": "uint24"},
+                                {"internalType": "int24", "name": "tickSpacing", "type": "int24"},
+                                {"internalType": "address", "name": "hooks", "type": "address"}
+                            ],
+                            "internalType": "struct PoolKey",
+                            "name": "poolKey",
+                            "type": "tuple"
+                        },
+                        {"internalType": "uint256", "name": "info", "type": "uint256"}
+                    ],
+                    "stateMutability": "view",
+                    "type": "function"
+                },
+                {
+                    "inputs": [{"internalType": "uint256", "name": "tokenId", "type": "uint256"}],
+                    "name": "getPositionLiquidity",
+                    "outputs": [{"internalType": "uint128", "name": "", "type": "uint128"}],
+                    "stateMutability": "view",
+                    "type": "function"
+                },
+                {
+                    "inputs": [],
+                    "name": "nextTokenId",
+                    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+                    "stateMutability": "view",
+                    "type": "function"
+                }
+            ]
+            self.position_manager = self.w3.eth.contract(
+                address=self.w3.to_checksum_address(self.position_manager_address),
+                abi=self.position_manager_abi
+            )
+        else:
+            self.position_manager = None
+        
         self.history = []
 
     def sqrt_price_to_human(self, sqrt_price_x96):
@@ -62,6 +109,94 @@ class MarketMonitor:
         """Convert tick to price"""
         import math
         return 1.0001 ** tick
+    
+    def fetch_position_ticks(self, pool_id_bytes=None):
+        """Fetch tick range from PositionManager for the most recent active position"""
+        if not self.position_manager:
+            return None, None
+        
+        try:
+            # Get nextTokenId to find the latest token ID
+            next_token_id = self.position_manager.functions.nextTokenId().call()
+            
+            # Try to find an active position by checking from the latest token ID backwards
+            # This ensures we get the most recent position after rebalancing
+            max_tokens_to_check = min(10, next_token_id)  # Check up to 10 most recent tokens
+            
+            for i in range(max_tokens_to_check):
+                token_id = next_token_id - 1 - i
+                if token_id < 1:
+                    break
+                
+                try:
+                    pool_key, position_info = self.position_manager.functions.getPoolAndPositionInfo(token_id).call()
+                    
+                    # Check if this position has active liquidity
+                    liquidity = self.position_manager.functions.getPositionLiquidity(token_id).call()
+                    if liquidity == 0:
+                        continue  # Skip positions with no liquidity
+                    
+                    # If pool_id_bytes is provided, verify it matches
+                    if pool_id_bytes:
+                        # Calculate poolId from poolKey
+                        # PoolId = keccak256(abi.encode(poolKey))
+                        from eth_abi import encode
+                        # PoolKey is a struct: (address currency0, address currency1, uint24 fee, int24 tickSpacing, address hooks)
+                        pool_key_tuple = (
+                            pool_key[0],  # currency0
+                            pool_key[1],  # currency1
+                            pool_key[2],  # fee
+                            pool_key[3],  # tickSpacing
+                            pool_key[4]   # hooks
+                        )
+                        pool_key_encoded = encode(
+                            ['address', 'address', 'uint24', 'int24', 'address'],
+                            pool_key_tuple
+                        )
+                        pool_id_calculated = Web3.keccak(pool_key_encoded)
+                        
+                        # Convert pool_id_bytes to bytes32 if it's a string
+                        if isinstance(pool_id_bytes, str):
+                            if pool_id_bytes.startswith('0x'):
+                                pool_id_bytes = bytes.fromhex(pool_id_bytes[2:])
+                            else:
+                                pool_id_bytes = bytes.fromhex(pool_id_bytes)
+                        
+                        if pool_id_calculated != pool_id_bytes:
+                            continue  # Skip positions from different pools
+                    
+                    # PositionInfo layout: 200 bits poolId | 24 bits tickUpper | 24 bits tickLower | 8 bits hasSubscriber
+                    # tickLower is at offset 8 bits, tickUpper is at offset 32 bits
+                    position_info_int = int(position_info)
+                    
+                    # Extract tickLower (24 bits at offset 8)
+                    tick_lower_raw = (position_info_int >> 8) & 0xFFFFFF
+                    # Sign extend int24 (if bit 23 is set, it's negative)
+                    if tick_lower_raw & (1 << 23):
+                        tick_lower = tick_lower_raw - (1 << 24)
+                    else:
+                        tick_lower = tick_lower_raw
+                    
+                    # Extract tickUpper (24 bits at offset 32)
+                    tick_upper_raw = (position_info_int >> 32) & 0xFFFFFF
+                    # Sign extend int24
+                    if tick_upper_raw & (1 << 23):
+                        tick_upper = tick_upper_raw - (1 << 24)
+                    else:
+                        tick_upper = tick_upper_raw
+                    
+                    return tick_lower, tick_upper
+                    
+                except Exception:
+                    # Token might not exist or be invalid, continue to next
+                    continue
+            
+            # No active position found
+            return None, None
+            
+        except Exception as e:
+            print(f"Error fetching position ticks: {e}", flush=True)
+            return None, None
 
     def fetch_onchain_price(self, pool_id):
         """Fetch price from Uniswap v4 PoolManager"""
@@ -187,11 +322,28 @@ class MarketMonitor:
                 print("Warning: Using fallback dummy price (oracle unavailable)", flush=True)
             
             if onchain and onchain.get('price', 0) > 0:
-                # If tick is at MIN_TICK or MAX_TICK, price might be at liquidity range boundary
-                # Calculate expected price at lower/upper tick for comparison
-                target_tick = 78240
-                tick_lower = target_tick - 600
-                tick_upper = target_tick + 600
+                # Try to fetch actual position ticks from PositionManager
+                # Pass pool_id to ensure we get ticks for the correct pool
+                # pool_id is bytes32, convert to bytes if it's a hex string
+                pool_id_for_check = pool_id
+                if isinstance(pool_id, str):
+                    if pool_id.startswith('0x'):
+                        pool_id_for_check = bytes.fromhex(pool_id[2:])
+                    else:
+                        pool_id_for_check = bytes.fromhex(pool_id)
+                elif not isinstance(pool_id, bytes):
+                    pool_id_for_check = None  # Skip pool_id check if format is unknown
+                
+                fetched_tick_lower, fetched_tick_upper = self.fetch_position_ticks(pool_id_bytes=pool_id_for_check)
+                
+                if fetched_tick_lower is not None and fetched_tick_upper is not None:
+                    tick_lower = fetched_tick_lower
+                    tick_upper = fetched_tick_upper
+                else:
+                    # Fallback to fixed values from deployment
+                    target_tick = 78240
+                    tick_lower = target_tick - 600
+                    tick_upper = target_tick + 600
                 
                 # If current tick is outside liquidity range, clamp price to range boundary
                 if onchain['tick'] < tick_lower:
@@ -212,9 +364,7 @@ class MarketMonitor:
                     last_valid_tick = onchain['tick']
                 pool_liquidity = self.fetch_pool_liquidity(pool_id)
                 
-                target_tick = 78240
-                tick_lower = target_tick - 600
-                tick_upper = target_tick + 600
+                # Calculate prices from ticks
                 price_lower = self.tick_to_price(tick_lower)
                 price_upper = self.tick_to_price(tick_upper)
                 
