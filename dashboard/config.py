@@ -19,7 +19,7 @@ def load_contract_addresses():
             try:
                 with open(path, 'r') as f:
                     config = json.load(f)
-                print(f"Config: Loaded from {path}: {config}", flush=True)
+                # Config loaded silently
                 return config
             except Exception as e:
                 print(f"Config: Error loading {path}: {e}. Trying next...", flush=True)

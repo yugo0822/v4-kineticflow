@@ -13,7 +13,6 @@ class MarketMonitor:
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         self.pool_manager_address = CONTRACTS['pool_manager']
-        print(f"Monitor: Using PoolManager at {self.pool_manager_address}", flush=True)
         
         self.pool_manager_abi = [
             {
@@ -307,7 +306,7 @@ class MarketMonitor:
         
     def run_monitoring(self, pool_id, interval=2):
         """Collect data periodically and save to DB"""
-        print(f"Start monitoring Pool: {pool_id} on {self.rpc_url}...", flush=True)
+        print(f"Monitor: Started for pool {pool_id.hex()[:16]}...", flush=True)
         from data_store import store 
         last_valid_price = None
         last_valid_tick = None
@@ -398,10 +397,17 @@ class MarketMonitor:
                 in_range = price_lower <= onchain['price'] <= price_upper
                 range_status = "✓ In Range" if in_range else "⚠️ Out of Range"
                 
-                print(f"Time: {time.strftime('%H:%M:%S')} | Pool: {data['pool_price']:.4f} | Ext: {data['external_price']:.4f} | Diff: {diff_ratio*100:.2f}% | {status}", flush=True)
-                print(f"  Range: [{price_lower:.2f}, {price_upper:.2f}] | Tick: [{tick_lower}, {tick_upper}] | Current: {onchain['tick']} | {range_status}", flush=True)
-                if pool_liquidity:
-                    print(f"  Pool Liquidity: {pool_liquidity / 1e18:.2f}", flush=True)
+                # Only log when there's a significant change or error condition
+                should_log = (
+                    abs(diff_ratio) > rebalance_threshold or  # Price deviation is significant
+                    not in_range or  # Price is out of range
+                    (last_valid_price is not None and abs(onchain['price'] - last_valid_price) / last_valid_price > 0.01)  # Price changed by >1%
+                )
+                
+                if should_log:
+                    print(f"[{time.strftime('%H:%M:%S')}] Pool: {data['pool_price']:.4f} | Ext: {data['external_price']:.4f} | Diff: {diff_ratio*100:.2f}% | {status}", flush=True)
+                    if not in_range:
+                        print(f"  ⚠️ Out of Range: [{price_lower:.2f}, {price_upper:.2f}] | Current: {onchain['tick']}", flush=True)
                 
                 last_valid_price = onchain['price']
                 last_valid_tick = onchain['tick']
@@ -419,7 +425,7 @@ if __name__ == "__main__":
     import traceback
     
     print("=" * 60, flush=True)
-    print("Monitor.py starting...", flush=True)
+    # Monitor starting silently
     print(f"CONTRACTS loaded: {CONTRACTS}", flush=True)
     print("=" * 60, flush=True)
     
@@ -455,7 +461,7 @@ if __name__ == "__main__":
         print(f"Computed Pool ID: {POOL_ID.hex()}", flush=True)
         
         monitor = MarketMonitor()
-        print(f"MarketMonitor initialized. Starting monitoring for Pool ID: {POOL_ID.hex()}", flush=True)
+        # MarketMonitor initialized silently
         
         monitor.run_monitoring(POOL_ID)
         

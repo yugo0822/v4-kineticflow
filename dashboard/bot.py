@@ -21,16 +21,17 @@ class SwapBot:
             "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
         )
         self.account = self.w3.eth.account.from_key(self.private_key)
-        print(f"Bot using account: {self.account.address}", flush=True)
-        
+        # Initialization logs removed - only log errors
+
+        # Contract addresses from config
         self.pool_manager_address = Web3.to_checksum_address(CONTRACTS['pool_manager'])
-        self.permit2_address = Web3.to_checksum_address(CONTRACTS.get('permit2', "0x000000000022D473030F116dDEE9F6B43aC78BA3"))
+        self.permit2_address = Web3.to_checksum_address(
+            CONTRACTS.get('permit2', "0x000000000022D473030F116dDEE9F6B43aC78BA3")
+        )
         self.swap_router_address = Web3.to_checksum_address(CONTRACTS['swap_router'])
         self.token0_address = Web3.to_checksum_address(CONTRACTS['token0'])
         self.token1_address = Web3.to_checksum_address(CONTRACTS['token1'])
         self.hook_address = Web3.to_checksum_address(CONTRACTS['hook'])
-        
-        print(f"Bot initialized with: PM={self.pool_manager_address}, Router={self.swap_router_address}, Permit2={self.permit2_address}", flush=True)
         
         self.fee = 3000
         self.tick_spacing = 60
@@ -132,7 +133,7 @@ class SwapBot:
 
     def approve_tokens(self):
         """Approve tokens for Router and Permit2"""
-        print("Approving tokens...", flush=True)
+        # Approving tokens silently
         max_uint256 = 2**256 - 1
         max_uint160 = 2**160 - 1
         max_uint48 = 2**48 - 1
@@ -158,7 +159,7 @@ class SwapBot:
                         signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
                         tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                         self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                        print(f"Approved {token_addr} for {spender_name} on Token", flush=True)
+                        # Approved silently
                 except Exception as e:
                     print(f"Token approval error: {e}", flush=True)
 
@@ -180,12 +181,9 @@ class SwapBot:
                     signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
                     tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                     receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                    if receipt['status'] == 1:
-                        print(f"Approved {token_addr} for Router on Permit2", flush=True)
-                    else:
-                         print(f"Permit2 Approval failed for {token_addr}", flush=True)
-                else:
-                    print(f"Already approved {token_addr} for Router on Permit2", flush=True)
+                    if receipt['status'] != 1:
+                        print(f"❌ Permit2 Approval failed for {token_addr}", flush=True)
+                # Already approved - no log needed
 
             except Exception as e:
                 print(f"Permit2 approval error: {e}", flush=True)
@@ -204,7 +202,7 @@ class SwapBot:
             router_allowance = token_contract.functions.allowance(self.account.address, self.swap_router_address).call()
             max_uint256 = 2**256 - 1
             if router_allowance < max_uint256 // 2:
-                print(f"Approving Router directly for {token_in}...", flush=True)
+                # Approve Router silently
                 tx = token_contract.functions.approve(self.swap_router_address, max_uint256).build_transaction({
                     'from': self.account.address,
                     'nonce': self.w3.eth.get_transaction_count(self.account.address),
@@ -214,7 +212,6 @@ class SwapBot:
                 signed_tx = self.w3.eth.account.sign_transaction(tx, self.private_key)
                 tx_hash = self.w3.eth.send_raw_transaction(signed_tx.raw_transaction)
                 self.w3.eth.wait_for_transaction_receipt(tx_hash)
-                print(f"Router approved for {token_in}", flush=True)
 
             pool_key = (
                 self.token0_address,
@@ -247,10 +244,10 @@ class SwapBot:
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
             
             if receipt['status'] == 1:
-                print(f"Swap executed: {'0->1' if zero_for_one else '1->0'} | Amount: {amount_in/1e18:.2f} | Hash: {tx_hash.hex()[:10]}...", flush=True)
+                print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | {tx_hash.hex()[:10]}...", flush=True)
                 return True
             else:
-                print(f"Swap reverted: {'0->1' if zero_for_one else '1->0'} | Hash: {tx_hash.hex()} | Gas used: {receipt.get('gasUsed', 'N/A')}", flush=True)
+                print(f"❌ Swap reverted: {'0->1' if zero_for_one else '1->0'} | Hash: {tx_hash.hex()[:10]}...", flush=True)
                 try:
                     result = self.router.functions.swapExactTokensForTokens(
                         amount_in_uint256,
@@ -273,7 +270,7 @@ class SwapBot:
 
     def run_noise_trader(self):
         """Noise trader: randomly buy and sell"""
-        print("Starting Noise Trader...", flush=True)
+        # Noise Trader starting silently
         while True:
             try:
                 time.sleep(random.uniform(5, 15))
@@ -288,7 +285,7 @@ class SwapBot:
 
     def run_arbitrage_bot(self):
         """Arbitrage bot: close price deviation"""
-        print("Starting Arbitrage Bot...", flush=True)
+        # Arbitrage Bot starting silently
         while True:
             try:
                 time.sleep(3)

@@ -232,7 +232,7 @@ if 'diff_ratio' in df.columns and len(df) > 0:
 fig.update_layout(template="plotly_dark", height=500, margin=dict(l=20, r=20, t=20, b=20),
                   xaxis_title="Time", yaxis_title="Price (USD)")
 
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, width='stretch')
 
 with st.expander("Raw Data"):
     st.dataframe(df.sort_values("timestamp", ascending=False))

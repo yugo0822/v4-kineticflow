@@ -30,7 +30,6 @@ class PriceSimulator:
         # Check RPC connection
         if not self.w3.is_connected():
             raise ConnectionError(f"Failed to connect to RPC at {self.rpc_url}")
-        print(f"Price Simulator: Connected to chain ID: {self.w3.eth.chain_id}", flush=True)
         
         # Private key (use Anvil's default account 0 directly)
         default_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
@@ -39,20 +38,15 @@ class PriceSimulator:
         # Use default if environment variable is empty or invalid
         if env_key and env_key.startswith("0x") and len(env_key) == 66:
             self.private_key = env_key
-            print(f"Price Simulator: Using PRIVATE_KEY from env", flush=True)
         else:
             self.private_key = default_key
-            print(f"Price Simulator: Using default Anvil account 0", flush=True)
         
         try:
             self.account = self.w3.eth.account.from_key(self.private_key)
-            print(f"Price Simulator: Using account: {self.account.address}", flush=True)
         except Exception as e:
-            print(f"Price Simulator: Error parsing private key: {e}", flush=True)
-            print(f"Price Simulator: Falling back to default key", flush=True)
+            print(f"❌ Price Simulator: Error parsing private key: {e}", flush=True)
             self.private_key = default_key
             self.account = self.w3.eth.account.from_key(self.private_key)
-            print(f"Price Simulator: Using account: {self.account.address}", flush=True)
         
         # MockV3Aggregator ABI
         self.aggregator_abi = [
@@ -108,16 +102,10 @@ class PriceSimulator:
         # Check owner
         try:
             owner = self.oracle.functions.owner().call()
-            print(f"Price Simulator: Oracle owner: {owner}", flush=True)
-            print(f"Price Simulator: Simulator account: {self.account.address}", flush=True)
-            
             if owner.lower() != self.account.address.lower():
-                print(f"WARNING: Oracle owner ({owner}) != Simulator account ({self.account.address})", flush=True)
-                print("Price updates will fail. Ensure PRIVATE_KEY matches Oracle owner.", flush=True)
-            else:
-                print("Price Simulator: Owner check PASSED - can update prices", flush=True)
+                print(f"⚠️ Price Simulator: Oracle owner mismatch. Updates may fail.", flush=True)
         except Exception as e:
-            print(f"Price Simulator: Error checking owner: {e}", flush=True)
+            print(f"❌ Price Simulator: Error checking owner: {e}", flush=True)
 
         # =======================
         # Volatility model params
@@ -209,7 +197,8 @@ class PriceSimulator:
             if random.random() < jump_chance:
                 jump = random.gauss(0, self.base_vol * 5)
                 change += jump
-                print(f"   >>> MARKET JUMP: {jump:+.2%}")
+                if abs(jump) > 0.03:  # Only log significant jumps (>3%)
+                    print(f"   >>> MARKET JUMP: {jump:+.2%}", flush=True)
 
         elif scenario == "crash":
             # 徐々に下がるトレンド + 恐怖によるボラティリティ増大
@@ -247,11 +236,7 @@ class PriceSimulator:
         - sine: Sine wave (periodic fluctuations)
         - random_walk: Random walk (±2%)
         """
-        print("=" * 60, flush=True)
-        print(f"Price Simulator starting...", flush=True)
-        print(f"Scenario: {scenario}", flush=True)
-        print(f"Update interval: {interval}s", flush=True)
-        print("=" * 60, flush=True)
+        print(f"Price Simulator: Started | Scenario: {scenario} | Interval: {interval}s", flush=True)
         
         current_price = base_price
         step = 0
@@ -264,9 +249,13 @@ class PriceSimulator:
                 
                 success = self.update_price(current_price)
                 
-                if success:
+                # Only log on significant price changes (>5%) or failures
+                if not success:
+                    print(f"[{step:04d}] ❌ Failed to update price: ${current_price:,.2f}", flush=True)
+                else:
                     diff = ((current_price / base_price) - 1) * 100
-                    print(f"[{step:04d}] Price: ${current_price:,.2f} ({diff:+.2f}%) | σ_curr: {self.current_vol:.2%}")
+                    if abs(diff) > 5.0 or step % 20 == 0:  # Log if >5% change or every 20 steps
+                        print(f"[{step:04d}] Price: ${current_price:,.2f} ({diff:+.2f}%) | σ: {self.current_vol:.2%}", flush=True)
                 
                 step += 1
                 time.sleep(interval)
