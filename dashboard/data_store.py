@@ -16,13 +16,13 @@ class DataStore:
                     timestamp REAL PRIMARY KEY,
                     pool_price REAL,
                     external_price REAL,
-                    tick INTEGER,
+                    tick REAL,
                     diff REAL,
                     diff_ratio REAL
                 )
             """)
             # Add new columns if they don't exist
-            for col in ['diff_ratio', 'tick_lower', 'tick_upper', 'price_lower', 'price_upper']:
+            for col in ['diff_ratio', 'tick_lower', 'tick_upper', 'price_lower', 'price_upper', 'pool_liquidity']:
                 try:
                     conn.execute(f"ALTER TABLE price_history ADD COLUMN {col} REAL")
                 except sqlite3.OperationalError:
@@ -37,21 +37,34 @@ class DataStore:
                 price_lower = data_dict.get('price_lower', None)
                 price_upper = data_dict.get('price_upper', None)
                 
+                pool_liquidity = data_dict.get('pool_liquidity', None)
+                # Convert large integers to float to avoid SQLite INTEGER overflow
+                # pool_liquidity is uint128, which can exceed SQLite INTEGER max (2^63-1)
+                if pool_liquidity is not None:
+                    # Convert to float (REAL) - divide by 1e18 to normalize if needed
+                    pool_liquidity = float(pool_liquidity) / 1e18 if pool_liquidity > 0 else 0.0
+                
+                # Ensure tick is within SQLite INTEGER range, convert to float if needed
+                tick = data_dict.get('tick', 0)
+                if isinstance(tick, int) and (tick < -9223372036854775808 or tick > 9223372036854775807):
+                    tick = float(tick)
+                
                 conn.execute("""
                     INSERT INTO price_history 
-                    (timestamp, pool_price, external_price, tick, diff, diff_ratio, tick_lower, tick_upper, price_lower, price_upper)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    (timestamp, pool_price, external_price, tick, diff, diff_ratio, tick_lower, tick_upper, price_lower, price_upper, pool_liquidity)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     data_dict['timestamp'], 
                     data_dict['pool_price'], 
                     data_dict['external_price'], 
-                    data_dict['tick'], 
+                    tick, 
                     data_dict['diff'], 
                     diff_ratio,
                     tick_lower,
                     tick_upper,
                     price_lower,
-                    price_upper
+                    price_upper,
+                    pool_liquidity
                 ))
 
     def get_volatility(self, window=20):

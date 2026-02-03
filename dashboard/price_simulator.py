@@ -108,13 +108,18 @@ class PriceSimulator:
             print(f"❌ Price Simulator: Error checking owner: {e}", flush=True)
 
         # =======================
-        # Volatility model params
-        # =======================
-        self.base_vol = float(os.getenv("PRICE_VOLATILITY", "0.02"))
+        # Volatility model parameters (GARCH + Jump-Diffusion)
+        # Adjusted for smoother, lower frequency price movement
+        self.base_vol = 0.005  # Reduced from 0.02 (0.5% base volatility)
         self.current_vol = self.base_vol
-        self.vol_persistence = 0.95
+        self.vol_persistence = 0.98  # Increased persistence for smoother vol changes
         self.last_return = 0.0
-        self.momentum = 0.2
+        self.momentum = 0.0
+        
+        # Jump parameters
+        self.jump_intensity = 0.005  # Reduced jump probability (0.5% per step)
+        self.jump_size_mean = 0.0
+        self.jump_size_std = 0.02  # Reduced jump size (2%)
     
     def get_current_price(self) -> float:
         """Get current price (human-readable format)"""
@@ -133,12 +138,22 @@ class PriceSimulator:
                 # Get latest nonce (including pending)
                 nonce = self.w3.eth.get_transaction_count(self.account.address, 'pending')
                 
-                # Create transaction
+                # Check balance before creating transaction
+                balance = self.w3.eth.get_balance(self.account.address)
+                gas_price = self.w3.eth.gas_price
+                estimated_gas_cost = 300000 * gas_price
+                
+                if balance < estimated_gas_cost:
+                    print(f"⚠️ Insufficient balance: {balance/1e18:.6f} ETH < {estimated_gas_cost/1e18:.6f} ETH (gas cost)", flush=True)
+                    return False
+                
+                # Use normal gas price (not 2x) for Anvil
+                # Anvil uses very low gas prices, so 2x is unnecessary and might cause issues
                 tx = self.oracle.functions.updateAnswer(scaled_price).build_transaction({
                     'from': self.account.address,
                     'nonce': nonce,
                     'gas': 300000,
-                    'gasPrice': int(self.w3.eth.gas_price * 2)
+                    'gasPrice': gas_price  # Use normal gas price, not 2x
                 })
                 
                 # Sign and send
@@ -151,13 +166,39 @@ class PriceSimulator:
                 return receipt.status == 1
                 
             except Exception as e:
-                # 1. First, output detailed error information (debugging purpose)
-                import traceback
-                error_details = traceback.format_exc()
-                print(f"DEBUG: Price update failed at attempt {attempt + 1}")
-                print(f"ERROR_LOG: {error_details}", flush=True)
-
                 error_str = str(e).lower()
+                
+                # Check for insufficient funds error
+                if 'insufficient funds' in error_str:
+                    # Check ETH balance and gas price
+                    try:
+                        balance = self.w3.eth.get_balance(self.account.address)
+                        balance_eth = balance / 1e18
+                        gas_price = self.w3.eth.gas_price
+                        gas_price_gwei = gas_price / 1e9
+                        estimated_cost = (300000 * gas_price) / 1e18
+                        
+                        print(f"⚠️ Insufficient funds error. Balance: {balance_eth:.6f} ETH, Gas price: {gas_price_gwei:.2f} gwei, Estimated cost: {estimated_cost:.6f} ETH", flush=True)
+                        
+                        if balance_eth < 0.01:  # Less than 0.01 ETH
+                            print(f"⚠️ CRITICAL: Low ETH balance ({balance_eth:.6f} ETH). Price updates paused.", flush=True)
+                            print(f"   Please restart Anvil to refill accounts, or send ETH to: {self.account.address}", flush=True)
+                            # Wait longer before retrying to avoid spam
+                            time.sleep(10)
+                            return False
+                        elif estimated_cost > balance_eth:
+                            print(f"⚠️ Gas cost ({estimated_cost:.6f} ETH) exceeds balance ({balance_eth:.6f} ETH).", flush=True)
+                            return False
+                    except Exception as balance_error:
+                        print(f"⚠️ Error checking balance: {balance_error}", flush=True)
+                
+                # 1. First, output detailed error information (only for non-funds errors)
+                if 'insufficient funds' not in error_str:
+                    import traceback
+                    error_details = traceback.format_exc()
+                    print(f"DEBUG: Price update failed at attempt {attempt + 1}")
+                    print(f"ERROR_LOG: {error_details}", flush=True)
+
                 if 'nonce' in error_str or 'replacement' in error_str:
                     # For nonce errors, wait a bit before returning to the start of the loop
                     time.sleep(0.5) 

@@ -36,6 +36,22 @@ class SwapBot:
         self.fee = 3000
         self.tick_spacing = 60
         
+        # PoolManager setup for reading pool state
+        self.pool_manager_abi = [
+            {
+                "inputs": [{"internalType": "bytes32", "name": "slot", "type": "bytes32"}],
+                "name": "extsload",
+                "outputs": [{"internalType": "bytes32", "name": "value", "type": "bytes32"}],
+                "stateMutability": "view",
+                "type": "function"
+            }
+        ]
+        
+        self.pool_manager = self.w3.eth.contract(
+            address=self.pool_manager_address,
+            abi=self.pool_manager_abi
+        )
+        
         self.router_abi = [
             {
                 "inputs": [
@@ -130,6 +146,21 @@ class SwapBot:
         self.permit2 = self.w3.eth.contract(address=self.permit2_address, abi=self.permit2_abi)
         
         self.approve_tokens()
+    
+    def get_pool_id(self):
+        """Calculate pool ID from pool key"""
+        pool_key_tuple = (
+            self.token0_address,
+            self.token1_address,
+            self.fee,
+            self.tick_spacing,
+            self.hook_address
+        )
+        pool_key_encoded = encode(
+            ['address', 'address', 'uint24', 'int24', 'address'],
+            pool_key_tuple
+        )
+        return Web3.keccak(pool_key_encoded)
 
     def approve_tokens(self):
         """Approve tokens for Router and Permit2"""
@@ -244,7 +275,36 @@ class SwapBot:
             receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
             
             if receipt['status'] == 1:
-                print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | {tx_hash.hex()[:10]}...", flush=True)
+                # Fetch price after swap to calculate actual price impact
+                try:
+                    pool_id = self.get_pool_id()
+                    
+                    # Fetch slot0 using extsload (same as monitor.py)
+                    pools_slot = b'\x00' * 31 + b'\x06'
+                    slot = Web3.keccak(pool_id + pools_slot)
+                    value = self.pool_manager.functions.extsload(slot).call()
+                    data = int.from_bytes(value, byteorder='big')
+                    
+                    sqrt_price_x96 = data & 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+                    tick_raw = (data >> 160) & 0xFFFFFF
+                    if tick_raw & (1 << 23):
+                        tick_after = tick_raw - (1 << 24)
+                    else:
+                        tick_after = tick_raw
+                    
+                    price_after = (sqrt_price_x96 / (2**96)) ** 2
+                    
+                    # Fetch liquidity after swap
+                    state_slot_int = int.from_bytes(slot, byteorder='big')
+                    liquidity_slot_int = state_slot_int + 3
+                    liquidity_slot_bytes = liquidity_slot_int.to_bytes(32, byteorder='big')
+                    liquidity_value = self.pool_manager.functions.extsload(liquidity_slot_bytes).call()
+                    liquidity_after = int.from_bytes(liquidity_value, byteorder='big')
+                    liquidity_after = liquidity_after & ((1 << 128) - 1)
+                    
+                    print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | Price: {price_after:.4f} | Tick: {tick_after} | Liquidity: {liquidity_after/1e18:.2f} | {tx_hash.hex()[:10]}...", flush=True)
+                except Exception as e:
+                    print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | {tx_hash.hex()[:10]}... (Error fetching post-swap state: {e})", flush=True)
                 return True
             else:
                 print(f"❌ Swap reverted: {'0->1' if zero_for_one else '1->0'} | Hash: {tx_hash.hex()[:10]}...", flush=True)
@@ -283,6 +343,41 @@ class SwapBot:
                 print(f"Noise trader error: {e}", flush=True)
                 time.sleep(5)
 
+    def calculate_optimal_amount(self, pool_price, ext_price, liquidity):
+        """
+        Calculate swap amount based on price difference
+        Adjusted for balanced price tracking with token scaling
+        """
+        if liquidity == 0:
+            return True, 0
+        
+        # Calculate price difference ratio
+        diff_ratio = abs(pool_price - ext_price) / ext_price
+        
+        # Determine direction: if pool_price > ext_price, sell Token0 (zero_for_one=True)
+        zero_for_one = pool_price > ext_price
+        
+        
+        if zero_for_one:
+            # Token0 is worth ~2500 Token1
+            base_amount = 1.0 * 1e18  # 1.0 Token0 base
+            max_amount = 5.0 * 1e18   # Max 5.0 Token0
+        else:
+            base_amount = 1.0 * 1e18 * pool_price  # Scale by price (~2500e18)
+            max_amount = 5.0 * 1e18 * pool_price   # Max 5.0 * Price
+            
+        amount = int(base_amount * diff_ratio * 10)  # Scale factor 10
+        
+        # Cap at reasonable limits
+        min_amount = int(0.01 * 1e18)
+        if not zero_for_one:
+             min_amount = int(0.01 * 1e18 * pool_price)
+             
+        amount = max(min_amount, min(amount, int(max_amount)))
+        
+        return zero_for_one, amount
+
+
     def run_arbitrage_bot(self):
         """Arbitrage bot: close price deviation"""
         # Arbitrage Bot starting silently
@@ -295,25 +390,44 @@ class SwapBot:
                 
                 with sqlite3.connect(store.db_path) as conn:
                     cursor = conn.cursor()
-                    cursor.execute("SELECT pool_price, external_price FROM price_history ORDER BY timestamp DESC LIMIT 1")
+                    cursor.execute("SELECT pool_price, external_price, pool_liquidity, price_lower, price_upper FROM price_history ORDER BY timestamp DESC LIMIT 1")
                     row = cursor.fetchone()
                 
                 if not row:
                     continue
                     
-                pool_price, ext_price = row
-                diff_ratio = (pool_price - ext_price) / ext_price
-                THRESHOLD = 0.005
-                ARB_AMOUNT = 2.0 * 1e18 
+                pool_price, ext_price, liquidity_raw, price_lower, price_upper = row
+                # Convert back from normalized value (was divided by 1e18 in data_store)
+                if liquidity_raw is None:
+                    liquidity = 0
+                else:
+                    liquidity = int(float(liquidity_raw) * 1e18)  # Convert back to wei units
                 
-                if diff_ratio > THRESHOLD:
-                    print(f"Arb opp: Pool({pool_price:.2f}) > Ext({ext_price:.2f}). Selling Token0.", flush=True)
-                    self.execute_swap(True, ARB_AMOUNT)
+                if liquidity == 0:
+                    continue
+                
+                # Check if current price is within active liquidity range
+                if price_lower and price_upper:
+                    if pool_price < price_lower or pool_price > price_upper:
+                        # Price is outside active liquidity range, skip arbitrage
+                        continue
+                
+                diff_ratio = (pool_price - ext_price) / ext_price
+                THRESHOLD = 0.005  # 0.5% threshold
+                
+                # Check both directions: pool_price > ext_price and ext_price > pool_price
+                if abs(diff_ratio) > THRESHOLD:
+                    # Calculate optimal amount (simplified approach)
+                    zero_for_one, optimal_amount = self.calculate_optimal_amount(
+                        pool_price, ext_price, liquidity
+                    )
                     
-                elif diff_ratio < -THRESHOLD:
-                    print(f"Arb opp: Pool({pool_price:.2f}) < Ext({ext_price:.2f}). Buying Token0.", flush=True)
-                    self.execute_swap(False, ARB_AMOUNT)
-                    
+                    if optimal_amount > 0:
+                        # Log concise arb info
+                        direction = "0->1" if zero_for_one else "1->0"
+                        print(f"⚖️ Arb: Target={ext_price:.2f} | {direction} | Amount={optimal_amount/1e18:.4f}", flush=True)
+                        self.execute_swap(zero_for_one, optimal_amount)
+                        
             except Exception as e:
                 print(f"Arbitrage bot error: {e}", flush=True)
                 time.sleep(5)

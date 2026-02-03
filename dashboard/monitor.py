@@ -340,23 +340,24 @@ class MarketMonitor:
                     tick_upper = fetched_tick_upper
                 else:
                     # Fallback to fixed values from deployment
+                    # Wider range: ±2000 ticks ≈ ±20% price range
                     target_tick = 78240
-                    tick_lower = target_tick - 600
-                    tick_upper = target_tick + 600
+                    tick_lower = target_tick - 2000
+                    tick_upper = target_tick + 2000
                 
                 # If current tick is outside liquidity range, clamp price to range boundary
                 if onchain['tick'] < tick_lower:
                     # Price is below lower tick - use lower tick price
                     price_lower = self.tick_to_price(tick_lower)
+                    actual_price_from_tick = self.tick_to_price(onchain['tick'])
                     if onchain['price'] < price_lower * 0.99:  # Allow small tolerance
                         onchain['price'] = price_lower
-                        print(f"Warning: Price below lower tick, clamping to {price_lower:.4f}", flush=True)
                 elif onchain['tick'] > tick_upper:
                     # Price is above upper tick - use upper tick price
                     price_upper = self.tick_to_price(tick_upper)
+                    actual_price_from_tick = self.tick_to_price(onchain['tick'])
                     if onchain['price'] > price_upper * 1.01:  # Allow small tolerance
                         onchain['price'] = price_upper
-                        print(f"Warning: Price above upper tick, clamping to {price_upper:.4f}", flush=True)
                 
                 if last_valid_price is None:
                     last_valid_price = onchain['price']
@@ -405,9 +406,17 @@ class MarketMonitor:
                 )
                 
                 if should_log:
+                    # Show actual tick and price before clamping
+                    actual_tick = onchain.get('tick', 'N/A')
+                    actual_price_before_clamp = onchain.get('price', 0)
+                    if onchain.get('tick') is not None:
+                        actual_price_from_tick = self.tick_to_price(onchain['tick'])
+                    else:
+                        actual_price_from_tick = 0
+                    
                     print(f"[{time.strftime('%H:%M:%S')}] Pool: {data['pool_price']:.4f} | Ext: {data['external_price']:.4f} | Diff: {diff_ratio*100:.2f}% | {status}", flush=True)
                     if not in_range:
-                        print(f"  ⚠️ Out of Range: [{price_lower:.2f}, {price_upper:.2f}] | Current: {onchain['tick']}", flush=True)
+                        print(f"  ⚠️ Out of Range: [{price_lower:.2f}, {price_upper:.2f}] | Tick: {actual_tick} (range: {tick_lower}-{tick_upper}) | Actual price from tick: {actual_price_from_tick:.4f}", flush=True)
                 
                 last_valid_price = onchain['price']
                 last_valid_tick = onchain['tick']

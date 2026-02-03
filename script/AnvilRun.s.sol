@@ -2,6 +2,7 @@
 pragma solidity ^0.8.26;
 
 import {BaseScript} from "./base/BaseScript.sol";
+import {LiquidityHelpers} from "./base/LiquidityHelpers.sol";
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
 import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -24,7 +25,7 @@ import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 /// @notice Script to run the full flow on a local Anvil chain
-contract AnvilRun is BaseScript {
+contract AnvilRun is BaseScript, LiquidityHelpers {
     using EasyPosm for IPositionManager;
 
     function run() external {
@@ -174,10 +175,13 @@ contract AnvilRun is BaseScript {
         // int24 tickLower = TickMath.minUsableTick(key.tickSpacing);
         // int24 tickUpper = TickMath.maxUsableTick(key.tickSpacing);
 
-        int24 tickLower = targetTick - 600;
-        int24 tickUpper = targetTick + 600;
+        // Wider range: ±2000 ticks ≈ ±20% price range
+        // This prevents frequent out-of-range situations with high volatility
+        // Round to tickSpacing to avoid TickMisaligned error
+        int24 tickLower = truncateTickSpacing(targetTick - 2000, key.tickSpacing);
+        int24 tickUpper = truncateTickSpacing(targetTick + 2000, key.tickSpacing);
 
-        uint128 liquidity = 100e18;
+        uint128 liquidity = 1000e18; // Increased from 100e18 to 1000e18 for better price stability
         
         (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
             sqrtPriceX96_2500,
