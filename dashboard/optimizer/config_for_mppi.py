@@ -2,8 +2,8 @@ import torch
 
 MPPI_CONFIG = {
     "PROPOSE": True,
-    "horizon": 10,
-    "num_samples": 1000,
+    "horizon": 1,
+    "num_samples": 10000,
     "num_samples_expect": 20,
     # Tick-based state/control to avoid tickSpacing rounding wiping out small changes
     "dim_state": 4,    # [t_market, t_pool, t_center, width_ticks]

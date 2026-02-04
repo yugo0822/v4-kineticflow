@@ -21,9 +21,10 @@ def stage_cost(state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
     in_range = (t_pool > lower) & (t_pool < upper)
     fee_reward = torch.where(in_range, -0.01, 0.0)
 
-    # 2) Tracking / divergence penalty
-    # Tick is log-price, so squared tick deviation is a natural proxy.
-    il_cost = 1e-5 * torch.pow((t_market - t_pool), 2)
+    # 2) Tracking / divergence penalty（追従誤差をより重視）
+    # Tickはlog-priceなので (t_market - t_pool)^2 が自然な距離。
+    # 重みを上げて、価格乖離を強く嫌うようにする。
+    il_cost = 5e-5 * torch.pow((t_market - t_pool), 2)
 
     # 3) Range-risk penalties (make "narrow ranges hit boundaries more often" matter)
     # (a) Boundary hit penalty: being pinned at lower/upper is bad (no liquidity beyond range).
@@ -42,11 +43,12 @@ def stage_cost(state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
     # (c) Market-outside penalty: if the *market* is outside the range, we are missing the market.
     market_outside = (t_market < lower) | (t_market > upper)
     market_outside_dist = torch.where(t_market < lower, lower - t_market, t_market - upper)
-    market_outside_cost = torch.where(market_outside, 1e-4 * market_outside_dist * market_outside_dist, 0.0)
+    # 重みを上げて、ジャンプ時にレンジをより強く追いかけるようにする。
+    market_outside_cost = torch.where(market_outside, 5e-4 * market_outside_dist * market_outside_dist, 0.0)
 
     # 4) Rebalance execution cost (gas proxy)
-    # Only charge when the action is meaningfully non-zero (tick-based).
-    rebalance_cost = torch.where(torch.abs(action).sum(dim=-1) > 60.0, 0.005, 0.0)
+    # 閾値を上げて「必要なときだけ」コストを払う。金額もやや下げる。
+    rebalance_cost = torch.where(torch.abs(action).sum(dim=-1) > 120.0, 0.002, 0.0)
 
     return (
         fee_reward
@@ -65,8 +67,8 @@ def terminal_cost(state: torch.Tensor) -> torch.Tensor:
     t_center = state[..., 2]
     w_ticks  = state[..., 3]
 
-    # 最終的な価格とレンジ中心のズレに対するペナルティ
-    dist_cost = 1e-5 * torch.pow((t_market - t_center), 2)
+    # 最終的な価格とレンジ中心のズレに対するペナルティ（追従誤差をやや強く）
+    dist_cost = 5e-5 * torch.pow((t_market - t_center), 2)
     
     # 幅が広すぎることに対するペナルティ (資本効率の低下を表現)
     width_penalty = 1e-4 * w_ticks

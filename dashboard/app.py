@@ -230,7 +230,8 @@ if 'diff_ratio' in df.columns and len(df) > 0:
     )
 
 fig.update_layout(template="plotly_dark", height=500, margin=dict(l=20, r=20, t=20, b=20),
-                  xaxis_title="Time", yaxis_title="Price (USD)")
+                  xaxis_title="Time", yaxis_title="Price (USD)",
+                  yaxis=dict(autorange=False, range=[1000, 4000]))
 
 st.plotly_chart(fig, width='stretch')
 

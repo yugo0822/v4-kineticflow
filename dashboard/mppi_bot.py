@@ -884,7 +884,8 @@ class MPPIBot:
                     # Execute on-chain
                     self.execute_rebalance(new_lower_tick, new_upper_tick)
                 
-                time.sleep(10) # Slower cycle for rebalancing (reduced frequency to lower costs)
+                # Control period
+                time.sleep(3)
                 
             except Exception as e:
                 print(f"MPPI Bot Error: {e}", flush=True)
