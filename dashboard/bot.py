@@ -16,9 +16,15 @@ class SwapBot:
         self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
+        # Use a dedicated key for arbitrage to allow "infinite balance" minting locally
+        # without accidentally affecting MPPI position sizing.
+        # Fallback to BOT_PRIVATE_KEY for backward compatibility.
         self.private_key = os.getenv(
-            "BOT_PRIVATE_KEY",
-            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+            "ARB_PRIVATE_KEY",
+            os.getenv(
+                "BOT_PRIVATE_KEY",
+                "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+            ),
         )
         self.account = self.w3.eth.account.from_key(self.private_key)
         # Initialization logs removed - only log errors
@@ -110,6 +116,15 @@ class SwapBot:
                 "name": "balanceOf",
                 "outputs": [{"name": "balance", "type": "uint256"}],
                 "type": "function"
+            },
+            # Mint is available on the local test tokens deployed by our scripts (MockERC20-style).
+            # This enables "infinite balance" for local Anvil simulations.
+            {
+                "constant": False,
+                "inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}],
+                "name": "mint",
+                "outputs": [],
+                "type": "function"
             }
         ]
         
@@ -146,6 +161,7 @@ class SwapBot:
         self.permit2 = self.w3.eth.contract(address=self.permit2_address, abi=self.permit2_abi)
         
         self.approve_tokens()
+        self.ensure_infinite_balance()
     
     def get_pool_id(self):
         """Calculate pool ID from pool key"""
@@ -219,16 +235,71 @@ class SwapBot:
             except Exception as e:
                 print(f"Permit2 approval error: {e}", flush=True)
 
+    def ensure_infinite_balance(self):
+        """
+        Local Anvil helper: keep arb bot balances topped up by calling token.mint().
+        This is ONLY intended for local simulations; real networks require funding.
+        """
+        enabled = os.getenv("ARB_INFINITE_BALANCE", "1").lower() in ("1", "true", "yes", "on")
+        if not enabled:
+            return
+
+        # Target: 1e9 tokens (in 18 decimals). Refill when below 20%.
+        target = int(1_000_000_000 * 1e18)
+        refill_threshold = int(target * 0.2)
+
+        for token_addr in [self.token0_address, self.token1_address]:
+            try:
+                token = self.w3.eth.contract(address=token_addr, abi=self.erc20_abi)
+                bal = token.functions.balanceOf(self.account.address).call()
+                if bal >= refill_threshold:
+                    continue
+
+                amount_to_mint = target - bal
+                # Safety clamp (uint256 headroom)
+                if amount_to_mint <= 0:
+                    continue
+
+                tx = token.functions.mint(self.account.address, int(amount_to_mint)).build_transaction(
+                    {
+                        "from": self.account.address,
+                        "nonce": self.w3.eth.get_transaction_count(self.account.address),
+                        "gas": 300_000,
+                        "gasPrice": self.w3.eth.gas_price,
+                    }
+                )
+                signed = self.w3.eth.account.sign_transaction(tx, self.private_key)
+                tx_hash = self.w3.eth.send_raw_transaction(signed.raw_transaction)
+                receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash)
+                if receipt["status"] != 1:
+                    print(f"❌ Mint failed for {token_addr}", flush=True)
+                else:
+                    # Minimal log (once per refill)
+                    print(f"🪙 Minted to arb bot: {token_addr} (+{amount_to_mint/1e18:.0f})", flush=True)
+            except Exception as e:
+                # If mint is not available / restricted, warn once per startup
+                print(f"⚠️ Could not mint {token_addr} (arb infinite balance disabled for this token): {e}", flush=True)
+
     def execute_swap(self, zero_for_one, amount_in):
         """Execute swap"""
         try:
             token_in = self.token0_address if zero_for_one else self.token1_address
             token_contract = self.w3.eth.contract(address=token_in, abi=self.erc20_abi)
+            # Keep balances topped up for local simulation
+            self.ensure_infinite_balance()
             balance = token_contract.functions.balanceOf(self.account.address).call()
             
             if balance < amount_in:
-                print(f"Insufficient balance for swap. Has {balance}, needs {amount_in}", flush=True)
-                return False
+                # Clamp to available balance (leave a small buffer)
+                clamped = int(balance * 0.95)
+                if clamped <= 0:
+                    print(f"Insufficient balance for swap. Has {balance}, needs {amount_in}", flush=True)
+                    return False
+                amount_in = clamped
+                # If still too small, skip
+                if amount_in < int(0.001 * 1e18):
+                    print(f"Insufficient balance for swap (too small after clamp). Has {balance}", flush=True)
+                    return False
 
             router_allowance = token_contract.functions.allowance(self.account.address, self.swap_router_address).call()
             max_uint256 = 2**256 - 1
@@ -369,9 +440,9 @@ class SwapBot:
         amount = int(base_amount * diff_ratio * 10)  # Scale factor 10
         
         # Cap at reasonable limits
+        # IMPORTANT: min trade should be in token units (not scaled by price),
+        # otherwise 1->0 minimum becomes huge and causes repeated "Insufficient balance".
         min_amount = int(0.01 * 1e18)
-        if not zero_for_one:
-             min_amount = int(0.01 * 1e18 * pool_price)
              
         amount = max(min_amount, min(amount, int(max_amount)))
         

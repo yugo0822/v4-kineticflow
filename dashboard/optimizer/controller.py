@@ -228,11 +228,10 @@ class S_MPPI(nn.Module):
         # update previous actions
         self._previous_action_seq = optimal_action_seq
 
-        # Hysteresis / Deadband: control input is zero if changes are small
-        # Assuming control action 0 is delta_P_center and action 1 is delta_width
-        # Thresholds can be adjusted
-        threshold_center = 1.0 # e.g. 1 tick/price unit
-        threshold_width = 1.0 
+        # Hysteresis / Deadband (tick-based)
+        # control action 0: Δtick_center, action 1: Δwidth_ticks
+        threshold_center = 60.0   # ~1 tickSpacing
+        threshold_width = 120.0   # ~2 tickSpacing
 
         current_action = optimal_action_seq[0] # The action to be applied now
         

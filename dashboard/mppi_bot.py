@@ -31,9 +31,14 @@ class MPPIBot:
         self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
+        # Use a dedicated key for MPPI to avoid sharing balances with arbitrage bot.
+        # Fallback to BOT_PRIVATE_KEY for backward compatibility.
         self.private_key = os.getenv(
-            "BOT_PRIVATE_KEY",
-            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+            "MPPI_PRIVATE_KEY",
+            os.getenv(
+                "BOT_PRIVATE_KEY",
+                "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+            ),
         )
         self.account = self.w3.eth.account.from_key(self.private_key)
         
@@ -278,7 +283,7 @@ class MPPIBot:
         return Web3.keccak(pool_key_encoded)
 
     def fetch_current_state(self):
-        """Fetch current state: [external_price, pool_price, range_center, range_width]"""
+        """Fetch current state (tick-based): [t_market, t_pool, t_center, width_ticks]"""
         try:
             # Get external_price and pool_price from database
             with sqlite3.connect(store.db_path) as conn:
@@ -299,18 +304,24 @@ class MPPIBot:
             tick_lower, tick_upper = self._fetch_current_range()
             
             if tick_lower is None or tick_upper is None:
-                # Fallback: use pool_price ± 20% if no position found
-                price_lower = pool_price * 0.8
-                price_upper = pool_price * 1.2
+                # Fallback: build a synthetic range around current pool tick
+                t_pool = float(self.price_to_tick(pool_price))
+                t_center = float(self.truncate_tick(int(round(t_pool))))
+                width_ticks = float(4000)  # ~±2000 ticks default
             else:
-                # Convert ticks to prices
-                price_lower = 1.0001 ** tick_lower
-                price_upper = 1.0001 ** tick_upper
-            
-            p_center = (price_upper + price_lower) / 2.0
-            width = price_upper - price_lower
-            
-            state = torch.tensor([ext_price, pool_price, p_center, width], dtype=self.dtype, device=self.device)
+                t_center = float(tick_lower + tick_upper) / 2.0
+                width_ticks = float(tick_upper - tick_lower)
+
+            # Convert observed prices to ticks (log-price)
+            t_market = float(self.price_to_tick(ext_price))
+            t_pool_obs = float(self.price_to_tick(pool_price))
+
+            # Use observed pool tick for state (not necessarily equal to range center)
+            state = torch.tensor(
+                [t_market, t_pool_obs, float(t_center), float(width_ticks)],
+                dtype=self.dtype,
+                device=self.device,
+            )
             return state
             
         except Exception as e:
@@ -623,9 +634,17 @@ class MPPIBot:
                 balance1,
             )
 
-            # Reserve some balance for arbitrage bot (use 70% instead of 95%)
-            # This prevents "Insufficient balance" errors in arbitrage bot
+            # Mint sizing:
+            # - Do NOT use "all available balance" because it can create absurd liquidity
+            #   (and then arbitrage swaps can't move the price).
+            # - Cap liquidity to keep the simulation responsive.
+            #   Default cap targets the original deployment scale (≈1000e18).
+            cap_e18 = float(os.getenv("MPPI_MAX_LIQUIDITY_E18", "2000"))  # in "1e18 liquidity units"
+            liquidity_cap = int(cap_e18 * 1e18)
+
             liquidity_to_mint = int(max_liquidity * 0.70)
+            if liquidity_to_mint > liquidity_cap:
+                liquidity_to_mint = liquidity_cap
 
             if liquidity_to_mint == 0:
                 print("❌ Calculated liquidity is 0. Cannot mint.", flush=True)
@@ -820,29 +839,47 @@ class MPPIBot:
                 # Execute MPPI Control
                 action, _ = self.mppi.forward(state)
                 
-                delta_center = action[0].item()
-                delta_width = action[1].item()
+                # Tick-based control
+                delta_center = float(action[0].item())  # Δtick_center
+                delta_width = float(action[1].item())   # Δwidth_ticks
+                
+                current_center = float(state[2].item())
+                current_width = float(state[3].item())
+                current_width = max(float(self.tick_spacing * 2), current_width)
+
+                current_lower_tick = self.truncate_tick(int(round(current_center - (current_width / 2.0))))
+                current_upper_tick = self.truncate_tick(int(round(current_center + (current_width / 2.0))))
+                if current_lower_tick >= current_upper_tick:
+                    current_upper_tick = current_lower_tick + self.tick_spacing
                 
                 if abs(delta_center) > 0 or abs(delta_width) > 0:
-                    current_center = state[2].item()
-                    current_width = state[3].item()
-                    
                     new_center = current_center + delta_center
-                    new_width = current_width + delta_width
-                    
-                    new_lower_price = new_center - (new_width / 2)
-                    new_upper_price = new_center + (new_width / 2)
-                    
-                    # Convert to ticks
-                    new_lower_tick = self.truncate_tick(self.price_to_tick(new_lower_price))
-                    new_upper_tick = self.truncate_tick(self.price_to_tick(new_upper_price))
+                    new_width = max(float(self.tick_spacing * 2), current_width + delta_width)
+
+                    new_lower_tick = self.truncate_tick(int(round(new_center - (new_width / 2.0))))
+                    new_upper_tick = self.truncate_tick(int(round(new_center + (new_width / 2.0))))
                     
                     if new_lower_tick >= new_upper_tick:
                         new_upper_tick = new_lower_tick + self.tick_spacing
                     
                     print(f"🚀 MPPI Rebalance Proposed:", flush=True)
-                    print(f"   Target Price: [{new_lower_price:.2f}, {new_upper_price:.2f}]", flush=True)
-                    print(f"   Target Ticks: [{new_lower_tick}, {new_upper_tick}]", flush=True)
+                    print(
+                        f"   State(ticks): t_mkt={state[0].item():.1f}, t_pool={state[1].item():.1f}, "
+                        f"t_center={current_center:.1f}, w={current_width:.1f}",
+                        flush=True,
+                    )
+                    print(f"   Control(ticks): Δcenter={delta_center:.1f}, Δw={delta_width:.1f}", flush=True)
+                    print(
+                        f"   Current Range: Ticks=[{current_lower_tick}, {current_upper_tick}] | "
+                        f"Price=[{1.0001**current_lower_tick:.2f}, {1.0001**current_upper_tick:.2f}]",
+                        flush=True,
+                    )
+                    print(
+                        f"   Target Range:  Ticks=[{new_lower_tick}, {new_upper_tick}] | "
+                        f"Price=[{1.0001**new_lower_tick:.2f}, {1.0001**new_upper_tick:.2f}]",
+                        flush=True,
+                    )
+                    print(f"   Tick Change: Lower={new_lower_tick - current_lower_tick:+d}, Upper={new_upper_tick - current_upper_tick:+d}", flush=True)
                     
                     # Execute on-chain
                     self.execute_rebalance(new_lower_tick, new_upper_tick)

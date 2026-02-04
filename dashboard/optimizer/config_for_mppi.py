@@ -5,10 +5,12 @@ MPPI_CONFIG = {
     "horizon": 10,
     "num_samples": 1000,
     "num_samples_expect": 20,
-    "dim_state": 4,    # [P_market, P_pool, P_center, width]
-    "dim_control": 2,  # [delta_P_center, delta_width]
-    "u_min": torch.tensor([-50.0, -100.0]), # 大きな価格変動に対応するため範囲を広げる
-    "u_max": torch.tensor([50.0, 100.0]),
-    "sigmas": torch.tensor([10.0, 20.0]),   # 探索ノイズも大きめに
+    # Tick-based state/control to avoid tickSpacing rounding wiping out small changes
+    "dim_state": 4,    # [t_market, t_pool, t_center, width_ticks]
+    "dim_control": 2,  # [delta_t_center, delta_width_ticks]
+    # Tick spacing is 60 in this project; keep controls on the order of a few hundred ticks
+    "u_min": torch.tensor([-600.0, -1200.0]),
+    "u_max": torch.tensor([600.0, 1200.0]),
+    "sigmas": torch.tensor([120.0, 240.0]),
     "lambda_": 1.0,
 }
