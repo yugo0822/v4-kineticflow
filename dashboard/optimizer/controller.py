@@ -228,7 +228,21 @@ class S_MPPI(nn.Module):
         # update previous actions
         self._previous_action_seq = optimal_action_seq
 
-        return optimal_action_seq
+        # Hysteresis / Deadband: control input is zero if changes are small
+        # Assuming control action 0 is delta_P_center and action 1 is delta_width
+        # Thresholds can be adjusted
+        threshold_center = 1.0 # e.g. 1 tick/price unit
+        threshold_width = 1.0 
+
+        current_action = optimal_action_seq[0] # The action to be applied now
+        
+        if abs(current_action[0]) < threshold_center:
+            current_action[0] = 0.0
+        
+        if abs(current_action[1]) < threshold_width:
+            current_action[1] = 0.0
+            
+        return current_action, optimal_action_seq # Return both immediate action and full sequence
 #########################################################################################33
 #########################################################################################
     def get_top_samples(self, num_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:

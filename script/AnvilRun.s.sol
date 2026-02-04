@@ -216,6 +216,8 @@ contract AnvilRun is BaseScript, LiquidityHelpers {
         // Write address config to file for dashboard
         string memory json = "{\"pool_manager\": \"";
         json = string.concat(json, vm.toString(address(poolManager)));
+        json = string.concat(json, "\", \"position_manager\": \"");
+        json = string.concat(json, vm.toString(address(positionManager)));
         json = string.concat(json, "\", \"permit2\": \"");
         json = string.concat(json, vm.toString(address(permit2)));
         json = string.concat(json, "\", \"swap_router\": \"");

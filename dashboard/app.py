@@ -225,7 +225,7 @@ if 'diff_ratio' in df.columns and len(df) > 0:
             title="Price Deviation (%)",
             overlaying="y",
             side="right",
-            range=[-2, 2]
+            range=[-10, 10]
         )
     )
 

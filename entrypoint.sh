@@ -9,5 +9,8 @@ python3 dashboard/monitor.py &
 # Run Trading Bot in background
 python3 dashboard/bot.py &
 
+# Run MPPI Rebalance Bot in background
+python3 dashboard/mppi_bot.py &
+
 # Run Streamlit in foreground
 streamlit run dashboard/app.py
