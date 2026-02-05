@@ -28,18 +28,19 @@ class MPPIBot:
         self.dtype = torch.float32
         
         # Web3 Setup
-        self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        self.rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         # Use a dedicated key for MPPI to avoid sharing balances with arbitrage bot.
         # Fallback to BOT_PRIVATE_KEY for backward compatibility.
-        self.private_key = os.getenv(
-            "MPPI_PRIVATE_KEY",
-            os.getenv(
-                "BOT_PRIVATE_KEY",
-                "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-            ),
-        )
+        self.private_key = os.getenv("MPPI_PRIVATE_KEY","0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
+        
         self.account = self.w3.eth.account.from_key(self.private_key)
         
         # Contract Addresses
@@ -647,7 +648,20 @@ class MPPIBot:
                 liquidity_to_mint = liquidity_cap
 
             if liquidity_to_mint == 0:
-                print("❌ Calculated liquidity is 0. Cannot mint.", flush=True)
+                # Helpful diagnostics so users know it's a balance / range issue,
+                # not an encoding bug.
+                try:
+                    bal0 = self.token0.functions.balanceOf(self.account.address).call()
+                    bal1 = self.token1.functions.balanceOf(self.account.address).call()
+                    print(
+                        "❌ Calculated liquidity is 0. Cannot mint.\n"
+                        f"   MPPI account={self.account.address}\n"
+                        f"   token0 balance={bal0/1e18:.6f}, token1 balance={bal1/1e18:.6f}\n"
+                        f"   ticks=[{new_lower_tick}, {new_upper_tick}], sqrtPriceX96={current_sqrt_price_x96}",
+                        flush=True,
+                    )
+                except Exception:
+                    print("❌ Calculated liquidity is 0. Cannot mint (failed to read balances).", flush=True)
                 return False
 
             mint_unlock_data = self.build_mint_unlock_data(

@@ -5,7 +5,8 @@ Usage:
     python dashboard/price_simulator.py
 
 Environment Variables:
-    ANVIL_RPC_URL: RPC endpoint (default: http://127.0.0.1:8545)
+    BASE_SEPOLIA_RPC_URL or RPC_URL or ANVIL_RPC_URL:
+        RPC endpoint (priority order; default: http://127.0.0.1:8545)
     PRIVATE_KEY: Private key for price updates (default: Anvil account 0)
     PRICE_SIMULATOR_INTERVAL: Update interval in seconds (default: 3)
     PRICE_VOLATILITY: Volatility (default: 0.02 = 2%)
@@ -24,7 +25,13 @@ load_dotenv()
 
 class PriceSimulator:
     def __init__(self):
-        self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC selection priority: Base Sepolia > generic RPC_URL > Anvil local
+        self.rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         # Check RPC connection

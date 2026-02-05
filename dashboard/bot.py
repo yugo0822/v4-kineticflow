@@ -13,19 +13,20 @@ load_dotenv()
 
 class SwapBot:
     def __init__(self):
-        self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        self.rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         # Use a dedicated key for arbitrage to allow "infinite balance" minting locally
         # without accidentally affecting MPPI position sizing.
         # Fallback to BOT_PRIVATE_KEY for backward compatibility.
-        self.private_key = os.getenv(
-            "ARB_PRIVATE_KEY",
-            os.getenv(
-                "BOT_PRIVATE_KEY",
-                "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-            ),
-        )
+        self.private_key = os.getenv("BOT_PRIVATE_KEY","0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
+        
         self.account = self.w3.eth.account.from_key(self.private_key)
         # Initialization logs removed - only log errors
 

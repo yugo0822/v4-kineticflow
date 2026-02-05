@@ -14,7 +14,6 @@ import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
 import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {EasyPosm} from "../test/utils/libraries/EasyPosm.sol";
 import {BalanceDelta} from "@uniswap/v4-core/src/types/BalanceDelta.sol";
 import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 import "forge-std/console.sol";
@@ -26,8 +25,6 @@ import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
 
 /// @notice Script to run the full flow on a local Anvil chain
 contract AnvilRun is BaseScript, LiquidityHelpers {
-    using EasyPosm for IPositionManager;
-
     function run() external {
         vm.startBroadcast();
 
@@ -190,7 +187,10 @@ contract AnvilRun is BaseScript, LiquidityHelpers {
             liquidity
         );
 
-        positionManager.mint(
+        // Avoid EasyPosm (can trigger stack-too-deep/Yul issues under via-ir).
+        // Use PositionManager.modifyLiquidities with LiquidityHelpers-encoded actions instead.
+        bytes memory hookData = "";
+        (bytes memory actions, bytes[] memory mintParams) = _mintLiquidityParams(
             key,
             tickLower,
             tickUpper,
@@ -198,9 +198,9 @@ contract AnvilRun is BaseScript, LiquidityHelpers {
             amount0Expected + 1, // slippage
             amount1Expected + 1, // slippage
             msg.sender,
-            block.timestamp + 60,
-            ""
+            hookData
         );
+        positionManager.modifyLiquidities(abi.encode(actions, mintParams), block.timestamp + 3600);
         console.log("Liquidity Added");
         
         // Verify price after adding liquidity

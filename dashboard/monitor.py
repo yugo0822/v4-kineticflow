@@ -9,7 +9,13 @@ load_dotenv()
 
 class MarketMonitor:
     def __init__(self):
-        self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        self.rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         self.pool_manager_address = CONTRACTS['pool_manager']

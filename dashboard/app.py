@@ -26,7 +26,13 @@ def fetch_live_external_price():
         from web3 import Web3
         from config import CONTRACTS
         
-        rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         w3 = Web3(Web3.HTTPProvider(rpc_url))
         
         oracle_address = CONTRACTS.get('oracle')
