@@ -42,6 +42,10 @@ class MPPIBot:
         self.private_key = os.getenv("MPPI_PRIVATE_KEY","0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
         
         self.account = self.w3.eth.account.from_key(self.private_key)
+
+        # Lightweight running totals for visibility
+        self._initial_portfolio_value_token1 = None
+        self._cumulative_gas_cost_eth = 0.0
         
         # Contract Addresses
         self.position_manager_address = self.w3.to_checksum_address(CONTRACTS['position_manager'])
@@ -720,6 +724,48 @@ class MPPIBot:
                     f"Price={gas_price_gwei:.2f} gwei | Cost={total_cost_eth:.6f} ETH (~${cost_usd_estimate:.2f})",
                     flush=True
                 )
+
+                # Store cumulative gas and simple portfolio value (token1-valued)
+                try:
+                    self._cumulative_gas_cost_eth += float(total_cost_eth)
+                    # pool price from sqrtPriceX96
+                    pool_price = (current_sqrt_price_x96 / (2**96)) ** 2
+                    bal0 = self.token0.functions.balanceOf(self.account.address).call()
+                    bal1 = self.token1.functions.balanceOf(self.account.address).call()
+                    v_token1 = (bal1 / 1e18) + (bal0 / 1e18) * float(pool_price)
+                    if self._initial_portfolio_value_token1 is None:
+                        self._initial_portfolio_value_token1 = v_token1
+                    pnl_token1 = v_token1 - self._initial_portfolio_value_token1
+
+                    print(
+                        f"📊 MPPI PnL: value={v_token1:.4f} token1, PnL={pnl_token1:+.4f} token1, "
+                        f"cumGas={self._cumulative_gas_cost_eth:.6f} ETH",
+                        flush=True,
+                    )
+
+                    store.append_tx_event(
+                        timestamp=time.time(),
+                        actor="mppi",
+                        event_type="rebalance",
+                        tx_hash=tx_hash.hex(),
+                        gas_used=int(total_gas_used),
+                        gas_price_wei=int(gas_price_mint) if isinstance(gas_price_mint, int) else None,
+                        cost_eth=float(total_cost_eth),
+                        pool_price=float(pool_price),
+                        portfolio_value_token1=float(v_token1),
+                        portfolio_pnl_token1=float(pnl_token1),
+                        meta={
+                            "burn_gas_used": int(gas_used_burn),
+                            "mint_gas_used": int(gas_used_mint),
+                            "burn_cost_eth": float(cost_burn_eth),
+                            "mint_cost_eth": float(cost_mint_eth),
+                            "cumulative_gas_cost_eth": float(self._cumulative_gas_cost_eth),
+                            "new_lower_tick": int(new_lower_tick),
+                            "new_upper_tick": int(new_upper_tick),
+                        },
+                    )
+                except Exception:
+                    pass
                 
                 # Additional verification: Check if new position was created
                 try:
