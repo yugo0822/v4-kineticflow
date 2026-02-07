@@ -5,7 +5,7 @@ import {BaseScript} from "./base/BaseScript.sol";
 import {LiquidityHelpers} from "./base/LiquidityHelpers.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {HookMiner} from "@uniswap/v4-periphery/src/utils/HookMiner.sol";
+import {HookMiner} from "./utils/HookMiner.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
@@ -88,16 +88,16 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
         }
 
         // 2) Hook deploy (CREATE2 mined address with correct flags)
-        // When using forge script --broadcast, "new Counter{salt}" is sent by the EOA (deployer),
-        // so we must pass the deployer address to HookMiner.find(), not CREATE2_FACTORY.
-        address deployerAddr = vm.addr(deployerPk);
+        // Forge script --broadcast uses the CREATE2 deployer (0x4e59...) for "new X{salt}",
+        // so we must use CREATE2_FACTORY in HookMiner.find() or the deployed address won't match
+        // the required hook flags and PoolManager will revert with HookAddressNotValid.
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                 | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
         bytes memory constructorArgs = abi.encode(poolManager);
         (address hookAddress, bytes32 salt) =
-            HookMiner.find(deployerAddr, flags, type(Counter).creationCode, constructorArgs);
+            HookMiner.find(CREATE2_FACTORY, flags, type(Counter).creationCode, constructorArgs);
 
         Counter hook = new Counter{salt: salt}(poolManager);
         require(address(hook) == hookAddress, "Hook address mismatch");

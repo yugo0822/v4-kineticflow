@@ -1,5 +1,9 @@
 # v4-KineticFlow: Predictive Liquidity for Uniswap v4
-
+<p align="center">
+  <img src="demo.gif" alt="v4-KineticFlow Demo" width="800px">
+  <br>
+  <i>MPPI-driven stochastic range optimization in action on Base Sepolia.</i>
+</p>
 **_From reflexes to foresight: a model-predictive LP agent on Base._**
 
 `v4-KineticFlow` is an agentic liquidity vault for **Uniswap v4** that uses  
@@ -62,6 +66,35 @@ We formulate the MPPI problem directly in **ticks**, the discrete unit of Uniswa
 
 The corresponding **target Uniswap v4 range** is:
 $$t_\text{lower} = t_\text{center}^{\text{new}} - w_\text{ticks}^{\text{new}},\quad t_\text{upper} = t_\text{center}^{\text{new}} + w_\text{ticks}^{\text{new}}$$
+
+### Orbit Cost (Trajectory Cost) and Dynamics
+
+The **path cost** $S^k$ in MPPI is the sum of **stage costs** over the horizon, a **terminal cost**, and a **control penalty**. The implementation in `dashboard/optimizer/` uses the following.
+
+**Dynamics** (`utils.py`):
+
+- **State** $x_t = [t_\text{mkt},\, t_\text{pool},\, t_\text{center},\, w_\text{ticks}]$ evolves as:
+  - **Market tick**: $t_\text{mkt}(t+1) = t_\text{mkt}(t) + \Delta t_\text{mkt}$ with $\Delta t_\text{mkt} = \log(\text{price factor}) / \log(1.0001)$. Price factors are sampled from a **jump–diffusion** model: GBM with $\sigma=0.02$, $\mu=0$, plus jumps (probability $0.05$, size $\exp(0.1 \cdot z)$), then clamped to $[0.7,\, 1.3]$ to avoid extreme outliers.
+  - **Range**: $t_\text{center}(t+1) = t_\text{center}(t) + \Delta t_\text{center}$, $w_\text{ticks}(t+1) = \max(w_\text{ticks}(t) + \Delta w_\text{ticks},\, 120)$ (width lower bound aligned with `tickSpacing=60`).
+  - **Pool tick**: Follows market within the range; outside the range it is clamped to the range bounds. Tracking speed uses a deviation-dependent gain $k = 0.2 + 0.75\tanh(2 \cdot \text{rel\_dev})$ so the pool price moves faster when it is far from the market.
+
+**Stage cost** $\ell(x_t,\, u_t)$ (`cost_function.py`), per step:
+
+| Term | Formula / condition | Role |
+|------|----------------------|------|
+| Fee reward | $-0.01$ if pool tick is in range, else $0$ | Encourages in-range liquidity. |
+| IL / tracking | $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{pool})^2$ | Penalizes pool–market tick divergence (proxy for IL). |
+| Boundary hit | $0.05$ if pool tick is within 1 tick of lower/upper edge | Discourages being pinned at range edges. |
+| Proximity | $2 \times 10^{-5} \cdot \text{proximity}^2$, with $\text{proximity} = \max(0,\, 120 - \text{dist\_to\_edge})$ (tick) | Prefers keeping the pool tick at least ~120 ticks away from range edges (buffer). |
+| Market outside | $5 \times 10^{-4} \cdot d^2$ if market tick is outside range, $d$ = distance to nearest bound | Strong penalty when the market has left the current range. |
+| Rebalance (gas proxy) | $0.002$ if $\|\Delta t_\text{center}\| + \|\Delta w_\text{ticks}\| > 120$ ticks | Approximates gas cost for non-trivial rebalances. |
+
+**Terminal cost** $\phi(x_T)$:
+
+- **Distance**: $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{center})^2$ — penalizes end-of-horizon misalignment of market and range center.
+- **Width**: $1 \times 10^{-4} \cdot w_\text{ticks}$ — penalizes wide ranges (lower capital efficiency).
+
+**Total path cost** (controller): $S^k = \sum_{t=0}^{T-1} \ell(x_t^k,\, u_t^k) + \phi(x_T^k) + \lambda \sum_{t=0}^{T-1} \text{action\_cost}(u_t^k)$. Control inputs are weighted by the same $\lambda$ and noise covariance used in the MPPI update. All cost weights and the dynamics parameters above are defined in `dashboard/optimizer/utils.py` and `dashboard/optimizer/cost_function.py`.
 
 ---
 
