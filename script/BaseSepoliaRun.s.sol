@@ -88,13 +88,16 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
         }
 
         // 2) Hook deploy (CREATE2 mined address with correct flags)
+        // When using forge script --broadcast, "new Counter{salt}" is sent by the EOA (deployer),
+        // so we must pass the deployer address to HookMiner.find(), not CREATE2_FACTORY.
+        address deployerAddr = vm.addr(deployerPk);
         uint160 flags = uint160(
             Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
                 | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
         bytes memory constructorArgs = abi.encode(poolManager);
         (address hookAddress, bytes32 salt) =
-            HookMiner.find(CREATE2_FACTORY, flags, type(Counter).creationCode, constructorArgs);
+            HookMiner.find(deployerAddr, flags, type(Counter).creationCode, constructorArgs);
 
         Counter hook = new Counter{salt: salt}(poolManager);
         require(address(hook) == hookAddress, "Hook address mismatch");
