@@ -16,8 +16,8 @@ load_dotenv()
 st.set_page_config(page_title="Uniswap v4 Monitor", layout="wide")
 st_autorefresh(interval=1000, key="data_refresh")
 
-st.title("📊Dynamic Range Optimizer (Anvil Local)")
-st.markdown("v4 Dynamic Liquidity Management Dashboard")
+# st.title("📊Dynamic Range Optimizer")
+# st.markdown("v4 Dynamic Liquidity Management Dashboard")
 
 @st.cache_data(ttl=2)
 def fetch_live_external_price():
@@ -26,7 +26,13 @@ def fetch_live_external_price():
         from web3 import Web3
         from config import CONTRACTS
         
-        rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         w3 = Web3(Web3.HTTPProvider(rpc_url))
         
         oracle_address = CONTRACTS.get('oracle')
@@ -116,25 +122,9 @@ with col4:
     else:
         diff_ratio_pct = (price_gap / display_ext_price * 100) if display_ext_price > 0 else 0
     
-    rebalance_threshold = 0.5  # 0.5%
-    if abs(diff_ratio_pct) > rebalance_threshold:
-        status_emoji = "⚠️"
-        status_color = "red"
-        status_text = "REBALANCE NEEDED"
-    elif abs(diff_ratio_pct) > rebalance_threshold * 0.5:
-        status_emoji = "⚡"
-        status_color = "orange"
-        status_text = "Monitor"
-    else:
-        status_emoji = "✓"
-        status_color = "green"
-        status_text = "OK"
-    
     st.metric(
         "Price Deviation", 
         f"{diff_ratio_pct:.2f}%",
-        delta=f"{status_emoji} {status_text}",
-        delta_color=status_color if abs(diff_ratio_pct) > rebalance_threshold else "off"
     )
 
 # Display liquidity range information
@@ -187,7 +177,7 @@ if 'price_lower' in df.columns and 'price_upper' in df.columns:
             y=[latest_price_lower, latest_price_lower],
             mode='lines',
             name='Lower Tick Price',
-            line=dict(color='red', width=1, dash='dash'),
+            line=dict(color='red', width=2, dash='dash'),
             opacity=0.5
         ))
         fig.add_trace(go.Scatter(
@@ -195,7 +185,7 @@ if 'price_lower' in df.columns and 'price_upper' in df.columns:
             y=[latest_price_upper, latest_price_upper],
             mode='lines',
             name='Upper Tick Price',
-            line=dict(color='red', width=1, dash='dash'),
+            line=dict(color='red', width=2, dash='dash'),
             opacity=0.5
         ))
 
@@ -225,7 +215,7 @@ if 'diff_ratio' in df.columns and len(df) > 0:
             title="Price Deviation (%)",
             overlaying="y",
             side="right",
-            range=[-10, 10]
+            range=[-20, 20]
         )
     )
 

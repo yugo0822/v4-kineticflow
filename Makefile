@@ -2,8 +2,23 @@
 IMAGE_NAME = v4-dashboard
 CONTAINER_NAME = v4-mppi-run
 
+# ============================================
+# Optional .env loading (do NOT commit .env)
+# ============================================
+#
+# This allows:
+#   - storing PRIVATE_KEY / BASE_SEPOLIA_RPC_URL in .env
+#   - running `make deploy-base-sepolia` without inline secrets
+#
+# .env format must be simple KEY=VALUE lines (compatible with Make).
+ifneq ($(wildcard .env),)
+  include .env
+  export
+endif
+
 # Deployment settings
 ANVIL_RPC_URL ?= http://127.0.0.1:8545
+BASE_SEPOLIA_RPC_URL ?= https://sepolia.base.org
 ANVIL_PRIVATE_KEY ?= 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 SCRIPT_DIR = script
 
@@ -104,17 +119,17 @@ deploy-anvil: anvil-status
 deploy-base-sepolia:
 	@if [ -z "$$PRIVATE_KEY" ]; then \
 		echo "Error: PRIVATE_KEY environment variable is required"; \
-		echo "Usage: PRIVATE_KEY=your_key make deploy-base-sepolia"; \
+		echo "Usage: PRIVATE_KEY=0x... BASE_SEPOLIA_RPC_URL=... make deploy-base-sepolia"; \
+		echo "Tip: put PRIVATE_KEY and BASE_SEPOLIA_RPC_URL into .env (not committed) and re-run"; \
 		exit 1; \
 	fi
 	@echo "=========================================="
 	@echo "Deploying to Base Sepolia"
 	@echo "=========================================="
-	@if [ -z "$$BASE_SEPOLIA_RPC_URL" ]; then \
-		echo "Warning: BASE_SEPOLIA_RPC_URL not set, using default"; \
-	fi
+	@echo "RPC URL: $(BASE_SEPOLIA_RPC_URL)"
+	@echo ""
 	forge script $(SCRIPT_DIR)/BaseSepoliaRun.s.sol \
-		--rpc-url $$BASE_SEPOLIA_RPC_URL \
+		--rpc-url $(BASE_SEPOLIA_RPC_URL) \
 		--broadcast \
 		--private-key $$PRIVATE_KEY \
 		--verify

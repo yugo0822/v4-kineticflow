@@ -1,0 +1,32 @@
+# Exclude unnecessary files from Docker build context to save space
+
+# VCS
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local caches / artifacts
+.mypy_cache/
+.pytest_cache/
+.cache/
+*.log
+
+# Foundry / Solidity artifacts and libraries (not needed inside dashboard container)
+broadcast/
+cache/
+out/
+foundry-out/
+lib/
+
+# Node / JS artifacts
+node_modules/
+**/dist/
+
+# Editor / IDE
+.vscode/
+.idea/
+.cursor/
+

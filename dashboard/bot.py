@@ -13,21 +13,26 @@ load_dotenv()
 
 class SwapBot:
     def __init__(self):
-        self.rpc_url = os.getenv("ANVIL_RPC_URL", "http://127.0.0.1:8545")
+        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
+        self.rpc_url = (
+            os.getenv("BASE_SEPOLIA_RPC_URL")
+            or os.getenv("RPC_URL")
+            or os.getenv("ANVIL_RPC_URL")
+            or "http://127.0.0.1:8545"
+        )
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         
         # Use a dedicated key for arbitrage to allow "infinite balance" minting locally
         # without accidentally affecting MPPI position sizing.
         # Fallback to BOT_PRIVATE_KEY for backward compatibility.
-        self.private_key = os.getenv(
-            "ARB_PRIVATE_KEY",
-            os.getenv(
-                "BOT_PRIVATE_KEY",
-                "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-            ),
-        )
+        self.private_key = os.getenv("BOT_PRIVATE_KEY","0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d")
+        
         self.account = self.w3.eth.account.from_key(self.private_key)
         # Initialization logs removed - only log errors
+
+        # Simple portfolio tracking (token1-valued) for "total profit-ish" visibility
+        self._initial_portfolio_value_token1 = None
+        self._last_portfolio_value_token1 = None
 
         # Contract addresses from config
         self.pool_manager_address = Web3.to_checksum_address(CONTRACTS['pool_manager'])
@@ -364,6 +369,23 @@ class SwapBot:
                         tick_after = tick_raw
                     
                     price_after = (sqrt_price_x96 / (2**96)) ** 2
+
+                    # Portfolio value in token1 units (value = token1 + token0 * price)
+                    try:
+                        bal0 = self.w3.eth.contract(address=self.token0_address, abi=self.erc20_abi).functions.balanceOf(self.account.address).call()
+                        bal1 = self.w3.eth.contract(address=self.token1_address, abi=self.erc20_abi).functions.balanceOf(self.account.address).call()
+                        v_token1 = (bal1 / 1e18) + (bal0 / 1e18) * float(price_after)
+                        if self._initial_portfolio_value_token1 is None:
+                            self._initial_portfolio_value_token1 = v_token1
+                        self._last_portfolio_value_token1 = v_token1
+                        pnl_token1 = v_token1 - self._initial_portfolio_value_token1
+                        print(
+                            f"📊 Arb PnL: value={v_token1:.4f} token1, PnL={pnl_token1:+.4f} token1",
+                            flush=True,
+                        )
+                    except Exception:
+                        v_token1 = None
+                        pnl_token1 = None
                     
                     # Fetch liquidity after swap
                     state_slot_int = int.from_bytes(slot, byteorder='big')
@@ -374,6 +396,31 @@ class SwapBot:
                     liquidity_after = liquidity_after & ((1 << 128) - 1)
                     
                     print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | Price: {price_after:.4f} | Tick: {tick_after} | Liquidity: {liquidity_after/1e18:.2f} | {tx_hash.hex()[:10]}...", flush=True)
+
+                    # Log gas + simple PnL metrics to DB (non-critical)
+                    try:
+                        gas_used = int(receipt.get("gasUsed", 0))
+                        gas_price = int(receipt.get("effectiveGasPrice", self.w3.eth.gas_price))
+                        cost_eth = (gas_used * gas_price) / 1e18
+                        store.append_tx_event(
+                            timestamp=time.time(),
+                            actor="arb",
+                            event_type="swap",
+                            tx_hash=tx_hash.hex(),
+                            gas_used=gas_used,
+                            gas_price_wei=gas_price,
+                            cost_eth=cost_eth,
+                            pool_price=float(price_after),
+                            portfolio_value_token1=v_token1,
+                            portfolio_pnl_token1=pnl_token1,
+                            meta={
+                                "direction": "0->1" if zero_for_one else "1->0",
+                                "amount_in_e18": int(amount_in),
+                                "tick_after": int(tick_after),
+                            },
+                        )
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"✅ Swap: {'0->1' if zero_for_one else '1->0'} | {amount_in/1e18:.2f} tokens | {tx_hash.hex()[:10]}... (Error fetching post-swap state: {e})", flush=True)
                 return True

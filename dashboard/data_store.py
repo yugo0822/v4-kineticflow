@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import sqlite3
 import threading
+import json
 
 class DataStore:
     def __init__(self, db_path="market_data.db"):
@@ -27,6 +28,24 @@ class DataStore:
                     conn.execute(f"ALTER TABLE price_history ADD COLUMN {col} REAL")
                 except sqlite3.OperationalError:
                     pass
+
+            # Transaction/event log for swaps/rebalances (lightweight metrics)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS tx_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp REAL,
+                    actor TEXT,
+                    event_type TEXT,
+                    tx_hash TEXT,
+                    gas_used INTEGER,
+                    gas_price_wei INTEGER,
+                    cost_eth REAL,
+                    pool_price REAL,
+                    portfolio_value_token1 REAL,
+                    portfolio_pnl_token1 REAL,
+                    meta_json TEXT
+                )
+            """)
 
     def append_data(self, data_dict):
         with self._lock:
@@ -66,6 +85,47 @@ class DataStore:
                     price_upper,
                     pool_liquidity
                 ))
+
+    def append_tx_event(
+        self,
+        *,
+        timestamp: float,
+        actor: str,
+        event_type: str,
+        tx_hash: str | None = None,
+        gas_used: int | None = None,
+        gas_price_wei: int | None = None,
+        cost_eth: float | None = None,
+        pool_price: float | None = None,
+        portfolio_value_token1: float | None = None,
+        portfolio_pnl_token1: float | None = None,
+        meta: dict | None = None,
+    ):
+        """Append a tx/event row for simple PnL + gas tracking."""
+        meta_json = json.dumps(meta or {}, ensure_ascii=False)
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    """
+                    INSERT INTO tx_events
+                    (timestamp, actor, event_type, tx_hash, gas_used, gas_price_wei, cost_eth, pool_price,
+                     portfolio_value_token1, portfolio_pnl_token1, meta_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        float(timestamp),
+                        str(actor),
+                        str(event_type),
+                        str(tx_hash) if tx_hash is not None else None,
+                        int(gas_used) if gas_used is not None else None,
+                        int(gas_price_wei) if gas_price_wei is not None else None,
+                        float(cost_eth) if cost_eth is not None else None,
+                        float(pool_price) if pool_price is not None else None,
+                        float(portfolio_value_token1) if portfolio_value_token1 is not None else None,
+                        float(portfolio_pnl_token1) if portfolio_pnl_token1 is not None else None,
+                        meta_json,
+                    ),
+                )
 
     def get_volatility(self, window=20):
         """Calculate volatility from recent price data"""
