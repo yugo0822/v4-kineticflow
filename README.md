@@ -14,7 +14,7 @@ rebalance concentrated liquidity ranges **before** the market moves there.
 Built on **Base Sepolia** with **Uniswap v4 Hooks** and a Python control engine,  
 the system continuously:
 
-- Simulates **$10^3+$** stochastic price paths.
+- Simulates **$10^4+$** stochastic price paths.
 - Scores each sequence with a **control-theoretic cost**.
 - Executes the optimal range update on-chain via `PositionManager.modifyLiquidities`.
 
@@ -28,6 +28,7 @@ It is a **stochastic optimal control policy** running **inside a DeFi protocol**
 - **Problem**: Today’s LP strategies are mostly _reactive_. They chase price after it moves, leak fees when out-of-range, and ignore the distribution of future prices.
 - **Idea**: Bring **stochastic optimal control** into Uniswap v4. Use **MPPI** to simulate thousands of possible future paths and place liquidity **where the price is most likely to be**, not where it is now.
 - **Implementation**:
+  - Built using the Uniswap Foundation v4-template as a foundation
   - Uniswap v4 stack + Hook on **Base Sepolia**.
   - Python MPPI engine controlling **ticks**, not prices.
   - Arbitrage bot that anchors pool price to an external oracle.
@@ -80,10 +81,29 @@ The **path cost** $S^k$ in MPPI is the sum of **stage costs** over the horizon, 
 
 **Dynamics** (`utils.py`):
 
-- **State** $x_t = [t_\text{mkt},\, t_\text{pool},\, t_\text{center},\, w_\text{ticks}]$ evolves as:
-  - **Market tick**: $t_\text{mkt}(t+1) = t_\text{mkt}(t) + \Delta t_\text{mkt}$ with $\Delta t_\text{mkt} = \log(\text{price factor}) / \log(1.0001)$. Price factors are sampled from a **jump–diffusion** model: GBM with $\sigma=0.02$, $\mu=0$, plus jumps (probability $0.05$, size $\exp(0.1 \cdot z)$), then clamped to $[0.7,\, 1.3]$ to avoid extreme outliers.
-  - **Range**: $t_\text{center}(t+1) = t_\text{center}(t) + \Delta t_\text{center}$, $w_\text{ticks}(t+1) = \max(w_\text{ticks}(t) + \Delta w_\text{ticks},\, 120)$ (width lower bound aligned with `tickSpacing=60`).
-  - **Pool tick**: Follows market within the range; outside the range it is clamped to the range bounds. Tracking speed uses a deviation-dependent gain $k = 0.2 + 0.75\tanh(2 \cdot \text{reldev})$ so the pool price moves faster when it is far from the market.
+To simulate realistic market behavior, we employ a **Jump-Diffusion model** for external price discovery.
+
+### 1. Market Tick Dynamics ($t_\text{mkt}$)
+* **Transition**: $t_\text{mkt}(t+1) = t_\text{mkt}(t) + \delta_t$
+* **Drift & Diffusion**: $\delta_t = \frac{\log(\text{price factor})}{\log(1.0001)}$
+* **Stochastic Process**:
+    * **Base**: Geometric Brownian Motion (GBM) with $\sigma=0.02, \mu=0$.
+    * **Jumps**: Probability of $0.05$ per step, with size $\exp(0.1 \cdot z)$.
+    * **Clamping**: Factors are clamped to $[0.7,\, 1.3]$ to eliminate extreme outliers while maintaining high volatility for stress testing.
+
+### 2. Liquidity Range Evolution ($t_\text{center}, w_\text{ticks}$)
+These represent the control variables adjusted by the MPPI agent to optimize liquidity concentration.
+
+* **Center Position**: $t_\text{center}(t+1) = t_\text{center}(t) + \Delta t_\text{center}$
+* **Range Width**: $w_\text{ticks}(t+1) = \max(w_\text{ticks}(t) + \Delta w_\text{ticks},\, 120)$
+    > **Note**: The lower bound of 120 ticks is enforced to remain compatible with Uniswap v4 `tickSpacing = 60`.
+
+### 3. Pool Tick Dynamics ($t_\text{pool}$)
+The pool tick follows the market tick within the active liquidity range. However, it is physically constrained (clamped) by the current range boundaries.
+
+* **Non-linear Tracking**: The speed of convergence depends on a deviation-dependent gain $k$:
+$$k = 0.2 + 0.75 \tanh(2 \cdot \text{reldev})$$
+* **Behavior**: The $\tanh$ function ensures that the pool price moves faster when it is significantly far from the market (e.g., after a rebalance or a jump), but remains stable when the deviation is small.
 
 **Stage cost** $\ell(x_t,\, u_t)$ (`cost_function.py`), per step:
 
@@ -92,7 +112,7 @@ The **path cost** $S^k$ in MPPI is the sum of **stage costs** over the horizon, 
 | Fee reward            | $-0.01$ if pool tick is in range, else $0$                                                                           | Encourages in-range liquidity.                                                    |
 | IL / tracking         | $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{pool})^2$                                                            | Penalizes pool–market tick divergence (proxy for IL).                             |
 | Boundary hit          | $0.05$ if pool tick is within 1 tick of lower/upper edge                                                             | Discourages being pinned at range edges.                                          |
-| Proximity             | $2 \times 10^{-5} \cdot \text{proximity}^2$, with $\text{proximity} = \max(0,\, 120 - \text{distance}\_\text{to}\_\text{edge})$ (tick) | Prefers keeping the pool tick at least ~120 ticks away from range edges (buffer). |
+| Proximity             | $2 \times 10^{-5} \cdot \text{proximity}^2$, with $\text{proximity} = \max(0,\, 120 - \text{distancetoedge})$ (tick) | Prefers keeping the pool tick at least ~120 ticks away from range edges (buffer). |
 | Market outside        | $5 \times 10^{-4} \cdot d^2$ if market tick is outside range, $d$ = distance to nearest bound                        | Strong penalty when the market has left the current range.                        |
 | Rebalance (gas proxy) | $0.002$ if $\|\Delta t_\text{center}\| + \|\Delta w_\text{ticks}\| > 120$ ticks                                      | Approximates gas cost for non-trivial rebalances.                                 |
 
@@ -101,46 +121,58 @@ The **path cost** $S^k$ in MPPI is the sum of **stage costs** over the horizon, 
 - **Distance**: $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{center})^2$ — penalizes end-of-horizon misalignment of market and range center.
 - **Width**: $1 \times 10^{-4} \cdot w_\text{ticks}$ — penalizes wide ranges (lower capital efficiency).
 
-**Total path cost** (controller): $S^k = \sum_{t=0}^{T-1} \ell(x_t^k,\, u_t^k) + \phi(x_T^k) + \lambda \sum_{t=0}^{T-1} \text{action}\_\text{cost}(u_t^k)$. Control inputs are weighted by the same $\lambda$ and noise covariance used in the MPPI update. All cost weights and the dynamics parameters above are defined in `dashboard/optimizer/utils.py` and `dashboard/optimizer/cost_function.py`.
+**Total path cost** (controller): $S^k = \sum_{t=0}^{T-1} \ell(x_t^k,\, u_t^k) + \phi(x_T^k) + \lambda \sum_{t=0}^{T-1} \text{actioncost}(u_t^k)$. Control inputs are weighted by the same $\lambda$ and noise covariance used in the MPPI update. All cost weights and the dynamics parameters above are defined in `dashboard/optimizer/utils.py` and `dashboard/optimizer/cost_function.py`.
 
 ---
 
 ## System Architecture
 
-The system bridges off-chain predictive compute with on-chain execution via Uniswap v4 Hooks on Base Sepolia.
+The system bridges Dockerized off-chain predictive compute with on-chain Uniswap v4 Hooks on Base Sepolia. This containerized architecture ensures reproducible, high-performance MPPI control for real-time, autonomous liquidity management.
 
 <p align="center">
   <img src="system_architecture.drawio.png" alt="System Architecture" width="800px">
 </p>
 
-## Roadmap
+---
 
-### Short-Term (Hackathon-Ready)
+## Demo
 
-- **Metrics dashboard**:
-  - add PnL & gas plots in `app.py` using `tx_events`
-  - support comparisons between:
-    - MPPI controller,
-    - fixed-range LP,
-    - naive periodic recentering.
+Our demo showcases the **KineticFlow-MPPI** agent autonomously managing liquidity on a Uniswap v4 pool.
 
-- **Parameter sweeps**:
-  - horizon length, number of samples, noise scales
-  - cost weights vs realized fee income and gas
+### Environment & Simulation Setup
+To rigorously test the control logic within the hackathon timeframe, we established the following environment:
 
-- **Safer production defaults**:
-  - stricter min/max liquidity,
-  - refined price-impact caps for arb swaps.
+- **Mock Market Prices**: We used a stochastic Jump-Diffusion model to generate mock external market prices. This allows us to simulate various market regimes, from steady trends to high-volatility shocks, ensuring the MPPI controller can adapt to diverse scenarios.
+- **Active Arbitrage Bot**: To create a realistic trading environment, we deployed a dedicated **Arbitrage Bot** that constantly monitors the price gap between our Uniswap v4 pool and the mock external market. This bot executes trades to rebalance the pool price, providing the "market pressure" necessary to test our liquidity management under real-world conditions.
+- **Visual Feedback**: The demo includes a real-time dashboard visualizing the MPPI's proposed range shifts vs. the actual pool price and the resulting PnL.
 
-### Long-Term Vision
+> **Note**: Crucially, for this demonstration, we intentionally simulated a highly volatile market environment to stress-test the algorithm under more stringent conditions, proving its robustness against rapid price swings.
 
-The long-term goal is to build a **general-purpose control layer for DeFi**, where:
+[Link to Demo Video] https://youtu.be/WbSvjjo0nMw
 
-- LP vaults, liquidators, and routers are all modeled as **interacting control systems**, and
-- DeFi can borrow the last 50 years of **control theory, PDEs, and stochastic calculus**  
-  instead of reinventing ad-hoc heuristics every cycle.
+---
+
+##  Roadmap & Future Vision
+
+### Short-Term Vision: Optimization & Transparency 
+- **Dynamic Volatility Adaptation**: Integrate an algorithm that estimates real-time market volatility and reflects it directly into the MPPI dynamics. This ensures optimal liquidity ranges even during high-slippage environments.
+- **High-Fidelity Profit UI**: Develop a more intuitive dashboard that visualizes Net PnL, earned fees, and impermanent loss in real-time.
+- **Comparative Benchmarking**: Clearly demonstrate the superiority of `KineticFlow-MPPI` by providing side-by-side performance data against naive methods (e.g., static v3 positions or periodic recentering).
+
+### Mid-Term Vision: Expansion & Accessibility
+- **Omnichain Interoperability**: Enable cross-chain interactions, allowing the MPPI controller to manage liquidity across multiple networks (e.g., Base, Arbitrum, and Ethereum Mainnet) simultaneously.
+- **Frictionless UX/UI**: Drastically simplify the interface so that any user, regardless of their background in control theory, can deploy sophisticated liquidity strategies with just a few clicks.
+- **Intelligent Presets**: Implement "One-Click Strategies" based on risk profiles (Low/Medium/High volatility targets).
+
+### Long-Term Vision: The Control Layer of DeFi
+Our ultimate goal is to establish **KineticFlow** as a general-purpose control layer for the entire DeFi ecosystem.
+- **DeFi as a Control System**: We envision a world where LP vaults, liquidators, and routers are all modeled as interacting control systems.
+- **Mathematical Foundation**: Instead of relying on ad-hoc heuristics, DeFi will leverage 50 years of proven research in **Control Theory, Partial Differential Equations (PDEs), and Stochastic Calculus** ($dX_t = f(X_t, u_t)dt + g(X_t, u_t)dW_t$).
+- **Institutional-Grade Infrastructure**: Providing the mathematical rigor required for institutional capital to participate safely in decentralized markets.
 
 `v4-KineticFlow` is a first step: a concrete, running MPPI agent on Uniswap v4.
+
+
 
 ---
 
@@ -193,7 +225,14 @@ make logs
 - `📊 Arb PnL` / `📊 MPPI PnL` lines in logs,
 - Tx hashes on Base Sepolia explorer for rebalance and swap events.
 
-### Applicable prizes
+### 📂 Key Code Locations
+- **MPPI Controller**: `dashboard/optimizer/controller.py`
+- **Uniswap v4 Hook**: `src/KineticFlowHook.sol` (or your hook file name)
+- **On-chain Execution Logic**: `bot/mppi_bot.py`
+
+---
+
+## Applicable prizes
 
 **Uniswap Foundation — Agentic Finance:** v4-KineticFlow is an agent that programmatically manages concentrated liquidity on Uniswap v4: the MPPI controller computes optimal tick ranges and executes them on-chain via `PositionManager.modifyLiquidities` on Base Sepolia, with a v4 Hook and full transaction logging for transparency.
 
@@ -203,7 +242,7 @@ make logs
 
 ## Team / Author
 
-This project is built by a **Kyoto University** student specializing in:
+This project is built by a **Yugo Sudo** Kyoto University student specializing in:
 
 - **control engineering** (modeling, stochastic systems),
 - **machine learning**, and
@@ -228,3 +267,8 @@ If you are a **VC, protocol, or research lab** exploring:
 
 `v4-KineticFlow` is intended as a serious starting point — and a live demo —  
 for what that future could look like.
+
+
+[e-mail] west18u5@gmail.com
+
+[LinkedIn] https://www.linkedin.com/in/yugo-sudo-9a5190362/
