@@ -203,7 +203,7 @@ class S_MPPI(nn.Module):
         # 終端コストの計算
         terminal_costs_exp = self._terminal_cost(self._state_seq_batch_exp[:, :, -1, :])
 
-        # `num_samples_expect` 方向に平均を取る
+        # `num_samples_expect` 
         stage_costs = stage_costs_exp.mean(dim=1)  # (num_samples, horizon)
         action_costs = action_costs_exp.mean(dim=1)  # (num_samples, horizon)
         terminal_costs = terminal_costs_exp.mean(dim=1)  # (num_samples,)
