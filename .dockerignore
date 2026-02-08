@@ -15,7 +15,8 @@ __pycache__/
 *.log
 
 # Foundry / Solidity artifacts and libraries (not needed inside dashboard container)
-broadcast/
+# Keep broadcast/ so Contract addresses can be read in dashboard (or mount at run with -v)
+# broadcast/
 cache/
 out/
 foundry-out/

@@ -1,4 +1,5 @@
 # v4-KineticFlow: Predictive Liquidity for Uniswap v4
+
 <p align="center">
   <img src="demo.gif" alt="v4-KineticFlow Demo" width="800px">
   <br>
@@ -12,6 +13,7 @@ rebalance concentrated liquidity ranges **before** the market moves there.
 
 Built on **Base Sepolia** with **Uniswap v4 Hooks** and a Python control engine,  
 the system continuously:
+
 - Simulates **$10^3+$** stochastic price paths.
 - Scores each sequence with a **control-theoretic cost**.
 - Executes the optimal range update on-chain via `PositionManager.modifyLiquidities`.
@@ -23,7 +25,7 @@ It is a **stochastic optimal control policy** running **inside a DeFi protocol**
 
 ## TL;DR
 
-- **Problem**: Today’s LP strategies are mostly *reactive*. They chase price after it moves, leak fees when out-of-range, and ignore the distribution of future prices.
+- **Problem**: Today’s LP strategies are mostly _reactive_. They chase price after it moves, leak fees when out-of-range, and ignore the distribution of future prices.
 - **Idea**: Bring **stochastic optimal control** into Uniswap v4. Use **MPPI** to simulate thousands of possible future paths and place liquidity **where the price is most likely to be**, not where it is now.
 - **Implementation**:
   - Uniswap v4 stack + Hook on **Base Sepolia**.
@@ -37,28 +39,33 @@ It is a **stochastic optimal control policy** running **inside a DeFi protocol**
 ## The Problem: Reactive Concentrated Liquidity
 
 Uniswap v3/v4 gave LPs **concentrated liquidity**, but left them with a hard problem:
+
 - **Impermanent Loss (IL)** grows when LPs are stuck out-of-range.
 - **Capital efficiency** collapses if ranges are too wide “just to be safe”.
-- **Most bots are reactive**: They behave like *PID controllers* in a world that actually needs **predictive control**.
+- **Most bots are reactive**: They behave like _PID controllers_ in a world that actually needs **predictive control**.
 
-For an LP vault to be truly competitive, it must optimize **fee income − gas cost − IL** over a horizon, anticipating where price *will be*.
+For an LP vault to be truly competitive, it must optimize **fee income − gas cost − IL** over a horizon, anticipating where price _will be_.
 
 ---
 
 ## The Solution: An MPPI Engine on Uniswap v4
 
 ### MPPI Theory in One Paragraph
+
 MPPI (Model Predictive Path Integral control) is a sampling-based stochastic optimal control method. Instead of solving the Hamilton–Jacobi–Bellman PDE exactly, MPPI:
+
 1. Samples many control sequences $\{u_{0:T}^k\}_{k=1}^K$.
 2. Simulates trajectories $x_{0:T}^k$ with dynamics $x_{t+1} = f(x_t, u_t^k, \xi_t^k)$.
 3. Computes path costs:
-   $$S^k = \sum_{t=0}^{T-1} \ell(x_t^k, u_t^k) + \phi(x_T^k)$$
+   $$S^k = \sum_{t=0}^{T-1} \ell(x_t^k, u_t^k) + \phi(x_T^k) + \lambda \Sigma||u_t||\Sigma^{-1}$$
 4. Reweights controls using an exponential weighting:
    $$u_t^\star = \frac{\sum_k \exp(-S^k / \lambda)\, u_t^k}{\sum_k \exp(-S^k / \lambda)}$$
 5. Applies only the **first element** $u_0^\star$ on-chain, then repeats (receding horizon).
 
 ### Control State: Working in Tick Space
+
 We formulate the MPPI problem directly in **ticks**, the discrete unit of Uniswap v4:
+
 - **State** $x_t \in \mathbb{R}^4$:
   $$x_t = [t_\text{mkt}(t),\ t_\text{pool}(t),\ t_\text{center}(t),\ w_\text{ticks}(t)]$$
 - **Control** $u_t \in \mathbb{R}^2$:
@@ -80,14 +87,14 @@ The **path cost** $S^k$ in MPPI is the sum of **stage costs** over the horizon, 
 
 **Stage cost** $\ell(x_t,\, u_t)$ (`cost_function.py`), per step:
 
-| Term | Formula / condition | Role |
-|------|----------------------|------|
-| Fee reward | $-0.01$ if pool tick is in range, else $0$ | Encourages in-range liquidity. |
-| IL / tracking | $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{pool})^2$ | Penalizes pool–market tick divergence (proxy for IL). |
-| Boundary hit | $0.05$ if pool tick is within 1 tick of lower/upper edge | Discourages being pinned at range edges. |
-| Proximity | $2 \times 10^{-5} \cdot \text{proximity}^2$, with $\text{proximity} = \max(0,\, 120 - \text{dist\_to\_edge})$ (tick) | Prefers keeping the pool tick at least ~120 ticks away from range edges (buffer). |
-| Market outside | $5 \times 10^{-4} \cdot d^2$ if market tick is outside range, $d$ = distance to nearest bound | Strong penalty when the market has left the current range. |
-| Rebalance (gas proxy) | $0.002$ if $\|\Delta t_\text{center}\| + \|\Delta w_\text{ticks}\| > 120$ ticks | Approximates gas cost for non-trivial rebalances. |
+| Term                  | Formula / condition                                                                                                  | Role                                                                              |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Fee reward            | $-0.01$ if pool tick is in range, else $0$                                                                           | Encourages in-range liquidity.                                                    |
+| IL / tracking         | $5 \times 10^{-5} \cdot (t_\text{mkt} - t_\text{pool})^2$                                                            | Penalizes pool–market tick divergence (proxy for IL).                             |
+| Boundary hit          | $0.05$ if pool tick is within 1 tick of lower/upper edge                                                             | Discourages being pinned at range edges.                                          |
+| Proximity             | $2 \times 10^{-5} \cdot \text{proximity}^2$, with $\text{proximity} = \max(0,\, 120 - \text{dist\_to\_edge})$ (tick) | Prefers keeping the pool tick at least ~120 ticks away from range edges (buffer). |
+| Market outside        | $5 \times 10^{-4} \cdot d^2$ if market tick is outside range, $d$ = distance to nearest bound                        | Strong penalty when the market has left the current range.                        |
+| Rebalance (gas proxy) | $0.002$ if $\|\Delta t_\text{center}\| + \|\Delta w_\text{ticks}\| > 120$ ticks                                      | Approximates gas cost for non-trivial rebalances.                                 |
 
 **Terminal cost** $\phi(x_T)$:
 
@@ -125,7 +132,6 @@ The system bridges off-chain predictive compute with on-chain execution via Unis
   - stricter min/max liquidity,
   - refined price-impact caps for arb swaps.
 
-
 ### Long-Term Vision
 
 The long-term goal is to build a **general-purpose control layer for DeFi**, where:
@@ -152,7 +158,8 @@ The long-term goal is to build a **general-purpose control layer for DeFi**, whe
 1. Copy `.env.example` to `.env` and fill in:
    - `BASE_SEPOLIA_RPC_URL`
    - `PRIVATE_KEY`, `ARB_PRIVATE_KEY`, `MPPI_PRIVATE_KEY`
-2. Ensure `.env` is **never committed**.
+2. Optional: set `ETH_MAINNET_RPC_URL` to show ENS names (e.g. `vitalik.eth`) next to contract addresses in the Streamlit dashboard.
+3. Ensure `.env` is **never committed**.
 
 ### Typical Workflow (Base Sepolia)
 
@@ -185,6 +192,12 @@ make logs
 - LP range over time,
 - `📊 Arb PnL` / `📊 MPPI PnL` lines in logs,
 - Tx hashes on Base Sepolia explorer for rebalance and swap events.
+
+### Applicable prizes
+
+**Uniswap Foundation — Agentic Finance:** v4-KineticFlow is an agent that programmatically manages concentrated liquidity on Uniswap v4: the MPPI controller computes optimal tick ranges and executes them on-chain via `PositionManager.modifyLiquidities` on Base Sepolia, with a v4 Hook and full transaction logging for transparency.
+
+**ENS:** The dashboard integrates ENS by resolving and displaying primary .eth names next to contract and wallet addresses (using Ethereum mainnet for resolution). ENS-specific code lives in `dashboard/ens_utils.py` and the Contract addresses section in the Streamlit app; set `ETH_MAINNET_RPC_URL` in `.env` to enable resolution.
 
 ---
 
