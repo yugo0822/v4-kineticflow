@@ -10,13 +10,8 @@ import requests
 from dotenv import load_dotenv
 from data_store import store
 
-try:
-    from ens_utils import format_address_with_ens, resolve_address_to_ens
-    ENS_AVAILABLE = True
-except Exception:
-    ENS_AVAILABLE = False
-    format_address_with_ens = lambda addr, max_chars=10: (f"{addr[:max_chars+2]}...{addr[-4:]}" if len(addr) > (max_chars + 6) else addr)
-    resolve_address_to_ens = lambda addr: None
+def _short_address(addr: str, max_chars: int = 10) -> str:
+    return f"{addr[:max_chars+2]}...{addr[-4:]}" if len(addr) > (max_chars + 6) else addr
 
 
 load_dotenv()
@@ -236,7 +231,7 @@ st.plotly_chart(fig, width='stretch')
 with st.expander("Raw Data"):
     st.dataframe(df.sort_values("timestamp", ascending=False))
 
-# Contract addresses with optional ENS resolution (set ETH_MAINNET_RPC_URL for ENS names)
+# Contract addresses
 st.subheader("Contract addresses")
 try:
     from config import CONTRACTS
@@ -251,15 +246,10 @@ try:
         "oracle": "Oracle",
     }
     if CONTRACTS and isinstance(CONTRACTS, dict):
-        st.caption("Optional: set ETH_MAINNET_RPC_URL in .env to resolve and show ENS names (registry is on Ethereum mainnet).")
         for key, label in labels.items():
             addr = CONTRACTS.get(key)
             if addr:
-                try:
-                    display = format_address_with_ens(addr)
-                except Exception:
-                    display = f"{addr[:12]}...{addr[-4:]}" if len(addr) > 16 else addr
-                st.text(f"{label}: {display}")
+                st.text(f"{label}: {_short_address(addr)}")
         with st.expander("Raw addresses (copy)"):
             for key, label in labels.items():
                 addr = CONTRACTS.get(key)

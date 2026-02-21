@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Run Price Simulator in background (fluctuates prices)
-python3 dashboard/price_simulator.py --scenario volatile --interval 3 &
+# [Simulation only] Fluctuate oracle price (testnet / local Anvil)
+python3 -m dashboard.simulation.price_simulator --scenario volatile --interval 3 &
 
-# Run Monitor in background (fetches prices from MockV3Aggregator)
-python3 dashboard/monitor.py &
+# Monitor pool state and write to DB
+python3 -m dashboard.monitor.market_monitor &
 
-# Run Trading Bot in background
-python3 dashboard/bot.py &
+# [Simulation only] Arbitrage + noise trader (testnet / local Anvil)
+python3 -m dashboard.simulation.swap_bot &
 
-# Run MPPI Rebalance Bot in background
-python3 dashboard/mppi_bot.py &
+# MPPI rebalance bot (core - runs on mainnet too)
+python3 -m dashboard.core.mppi_bot &
 
-# Run Streamlit in foreground
+# Streamlit dashboard (foreground)
 streamlit run dashboard/app.py

@@ -1,5 +1,9 @@
 # Exclude unnecessary files from Docker build context to save space
 
+# Secrets — passed at runtime via `docker run --env-file .env` instead
+.env
+.env.*
+
 # VCS
 .git
 .gitignore

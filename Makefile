@@ -40,6 +40,7 @@ run:
 		--name $(CONTAINER_NAME) \
 		--add-host host.docker.internal:host-gateway \
 		-p 8501:8501 \
+		--env-file .env \ 
 		-v $(PWD)/broadcast:/app/broadcast \
 		-e ANVIL_RPC_URL="http://host.docker.internal:8545" \
 		$(IMAGE_NAME)
@@ -115,7 +116,22 @@ deploy-anvil: anvil-status
 	@echo "Addresses saved to: broadcast/addresses.json"
 	@echo "=========================================="
 
+# Pre-mine the hook CREATE2 salt (no broadcast — safe to run repeatedly).
+# Copy the printed HOOK_SALT value into .env, then run deploy-base-sepolia.
+mine-salt:
+	@if [ -z "$$PRIVATE_KEY" ]; then \
+		echo "Error: PRIVATE_KEY environment variable is required"; \
+		exit 1; \
+	fi
+	forge script $(SCRIPT_DIR)/BaseSepoliaRun.s.sol \
+		--sig "mineSalt()" \
+		--rpc-url $(BASE_SEPOLIA_RPC_URL)
+
 # Deploy to Base Sepolia
+# Recommended flow:
+#   1. make mine-salt              # find a CREATE2 salt (no tx sent)
+#   2. echo "HOOK_SALT=<value>" >> .env
+#   3. make deploy-base-sepolia    # deploy with pre-mined salt (faster, no MemoryOOG)
 deploy-base-sepolia:
 	@if [ -z "$$PRIVATE_KEY" ]; then \
 		echo "Error: PRIVATE_KEY environment variable is required"; \

@@ -1,53 +1,78 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {BaseScript} from "./base/BaseScript.sol";
-import {LiquidityHelpers} from "./base/LiquidityHelpers.sol";
+// ─────────────────────────────────────────────────────────────────────────────
+// This script does NOT inherit from Deployers / BaseScript / LiquidityHelpers.
+// Those base contracts embed the full v4 artifact bytecodes (Permit2, PoolManager,
+// PositionManager, SwapRouter) which inflated the compiled script to ~111 KB and
+// caused MemoryOOG when HookMiner looped over large memory.
+//
+// Instead, canonical Base Sepolia addresses are hardcoded and only the contracts
+// we actually deploy (Counter hook, MockERC20 tokens, MockV3Aggregator oracle)
+// contribute bytecode to this script.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import {Script} from "forge-std/Script.sol";
+import "forge-std/console.sol";
 
 import {Hooks} from "@uniswap/v4-core/src/libraries/Hooks.sol";
-import {HookMiner} from "./utils/HookMiner.sol";
 import {PoolKey} from "@uniswap/v4-core/src/types/PoolKey.sol";
 import {Currency} from "@uniswap/v4-core/src/types/Currency.sol";
 import {TickMath} from "@uniswap/v4-core/src/libraries/TickMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {StateLibrary} from "@uniswap/v4-core/src/libraries/StateLibrary.sol";
 import {FullMath} from "@uniswap/v4-core/src/libraries/FullMath.sol";
+import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
+import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
+
+import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
+import {Actions} from "@uniswap/v4-periphery/src/libraries/Actions.sol";
+
+import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
 
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
-import {IHooks} from "@uniswap/v4-core/src/interfaces/IHooks.sol";
-import {IPositionManager} from "@uniswap/v4-periphery/src/interfaces/IPositionManager.sol";
-import {IPermit2} from "permit2/src/interfaces/IPermit2.sol";
+
+import {HookMiner} from "./utils/HookMiner.sol";
 
 import {Counter} from "../src/Counter.sol";
 import {MockV3Aggregator} from "../src/MockV3Aggregator.sol";
 
-import "forge-std/console.sol";
+/// @notice Deploys the KineticFlow hook + test tokens + oracle on Base Sepolia,
+///         then initializes the pool and adds the initial LP position.
+///         Uses pre-deployed canonical Uniswap v4 contracts (no re-deployment).
+contract BaseSepoliaRun is Script {
+    // =========================================================================
+    // Canonical Base Sepolia (84532) addresses
+    // Source: https://docs.uniswap.org/contracts/v4/deployments
+    // =========================================================================
+    address constant POOL_MANAGER     = 0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408;
+    address constant POSITION_MANAGER = 0x4B2C77d209D3405F41a037Ec6c77F7F5b8e2ca80;
+    address constant PERMIT2          = 0x000000000022D473030F116dDEE9F6B43aC78BA3;
+    /// @dev hookmate IUniswapV4Router04 on Base Sepolia (from AddressConstants)
+    address constant SWAP_ROUTER      = 0x71cD4Ea054F9Cb3D3BF6251A00673303411A7DD9;
+    // CREATE2_FACTORY (0x4e59b44847b379578588920cA78FbF26c0B4956C) is already
+    // declared in forge-std/src/Base.sol as `CREATE2_FACTORY` and inherited via Script.
 
-/// @notice Script to run the full flow on Base Sepolia (or any testnet)
-/// @dev This script is designed to be safer for repeated runs than AnvilRun:
-///      - avoids "bot account mint" shortcuts by default
-///      - supports re-running without re-initializing a pool if already initialized
-///      - writes addresses to a chain-specific file
-contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
     function run() external {
-        // Use separate keys for deployment and for the MPPI LP owner.
-        // - PRIVATE_KEY: deploys contracts, can be any funded testnet account
-        // - MPPI_PRIVATE_KEY: owns the initial LP position and receives burn refunds
+        // ── Keys ──────────────────────────────────────────────────────────────
+        // PRIVATE_KEY  : deploys contracts (any funded testnet account)
+        // MPPI_PRIVATE_KEY : owns the LP position and receives burn refunds
         uint256 deployerPk = vm.envUint("PRIVATE_KEY");
-        uint256 mppiPk = vm.envOr("MPPI_PRIVATE_KEY", deployerPk);
-        address mppiAddr = vm.addr(mppiPk);
+        uint256 mppiPk     = vm.envOr("MPPI_PRIVATE_KEY", deployerPk);
+        address mppiAddr   = vm.addr(mppiPk);
 
-        // 0) Deploy Uniswap v4 stack and core components with the deployer key
+        IPoolManager     poolManager     = IPoolManager(POOL_MANAGER);
+        IPositionManager positionManager = IPositionManager(POSITION_MANAGER);
+        IPermit2         permit2         = IPermit2(PERMIT2);
+
         vm.startBroadcast(deployerPk);
 
-        // 0) Deploy Uniswap v4 Core & Periphery (for hook testing you typically deploy your own stack)
-        deployArtifacts();
-        console.log("Deployed PoolManager:", address(poolManager));
-        console.log("Deployed PositionManager:", address(positionManager));
-        console.log("Deployed SwapRouter:", address(swapRouter));
+        console.log("Using PoolManager:    ", POOL_MANAGER);
+        console.log("Using PositionManager:", POSITION_MANAGER);
+        console.log("Using SwapRouter:     ", SWAP_ROUTER);
+        console.log("Using Permit2:        ", PERMIT2);
 
-        // 1) Tokens
-        // If TOKEN0/TOKEN1 are provided, use them. Otherwise deploy mock tokens.
+        // ── 1) Tokens ─────────────────────────────────────────────────────────
         address token0Env = vm.envOr("TOKEN0", address(0));
         address token1Env = vm.envOr("TOKEN1", address(0));
 
@@ -66,6 +91,7 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
             tokensDeployedByScript = true;
         }
 
+        // Canonical token ordering (lower address = currency0)
         if (address(token0) > address(token1)) (token0, token1) = (token1, token0);
         Currency c0 = Currency.wrap(address(token0));
         Currency c1 = Currency.wrap(address(token1));
@@ -73,13 +99,9 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
         console.log("Token0:", address(token0));
         console.log("Token1:", address(token1));
 
-        // Mint only if we deployed the tokens.
-        // On testnet you can also provide TOKEN0/TOKEN1 and fund the deployer/MPPI externally.
         if (tokensDeployedByScript) {
             uint256 mintAmount0 = vm.envOr("MINT_TOKEN0_AMOUNT", uint256(10_000e18));
             uint256 mintAmount1 = vm.envOr("MINT_TOKEN1_AMOUNT", uint256(10_000e18));
-            // Mint directly to the MPPI LP owner so that subsequent burns
-            // and rebalances naturally refund tokens to this address.
             token0.mint(mppiAddr, mintAmount0);
             token1.mint(mppiAddr, mintAmount1);
             console.log("Minted token balances to MPPI LP owner:", mppiAddr);
@@ -87,24 +109,39 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
             console.log("Skipping mint for existing tokens. Ensure deployer has balance.");
         }
 
-        // 2) Hook deploy (CREATE2 mined address with correct flags)
-        // Forge script --broadcast uses the CREATE2 deployer (0x4e59...) for "new X{salt}",
-        // so we must use CREATE2_FACTORY in HookMiner.find() or the deployed address won't match
-        // the required hook flags and PoolManager will revert with HookAddressNotValid.
+        // ── 2) Hook deploy via CREATE2 ────────────────────────────────────────
         uint160 flags = uint160(
-            Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG | Hooks.BEFORE_ADD_LIQUIDITY_FLAG
-                | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+            Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
         );
-        bytes memory constructorArgs = abi.encode(poolManager);
-        (address hookAddress, bytes32 salt) =
-            HookMiner.find(CREATE2_FACTORY, flags, type(Counter).creationCode, constructorArgs);
+        bytes memory constructorArgs = abi.encode(address(poolManager));
 
-        Counter hook = new Counter{salt: salt}(poolManager);
+        // Tip: pre-mine the salt with the helper below to skip on-chain looping:
+        //   forge script script/BaseSepoliaRun.s.sol --sig "mineSalt()" --rpc-url <url>
+        // Then set HOOK_SALT=<result> in .env and re-run the full deploy.
+        bytes32 salt = bytes32(vm.envOr("HOOK_SALT", bytes32(0)));
+        address hookAddress;
+
+        if (salt != bytes32(0)) {
+            // Use pre-mined salt directly — avoids the expensive HookMiner loop.
+            hookAddress = HookMiner.computeAddress(
+                CREATE2_FACTORY,
+                uint256(salt),
+                abi.encodePacked(type(Counter).creationCode, constructorArgs)
+            );
+            console.log("Using pre-mined HOOK_SALT:", uint256(salt));
+        } else {
+            // Mine on-chain (slower; only needed on first deploy or after bytecode change).
+            (hookAddress, salt) = HookMiner.find(
+                CREATE2_FACTORY, flags, type(Counter).creationCode, constructorArgs
+            );
+        }
+
+        Counter hook = new Counter{salt: salt}(IPoolManager(POOL_MANAGER));
         require(address(hook) == hookAddress, "Hook address mismatch");
         console.log("Deployed Hook:", address(hook));
 
-        // 3) Oracle
-        // If ORACLE is provided, use it; otherwise deploy MockV3Aggregator (testnet-only convenience).
+        // ── 3) Oracle ─────────────────────────────────────────────────────────
         address oracleEnv = vm.envOr("ORACLE", address(0));
         MockV3Aggregator oracle;
         if (oracleEnv != address(0)) {
@@ -116,129 +153,162 @@ contract BaseSepoliaRun is BaseScript, LiquidityHelpers {
             console.log("Deployed MockV3Aggregator:", address(oracle));
         }
 
-        // 4) PoolKey + Initialize (idempotent)
+        // ── 4) PoolKey + Initialize (idempotent) ──────────────────────────────
         PoolKey memory key = PoolKey({
-            currency0: c0,
-            currency1: c1,
-            fee: uint24(vm.envOr("POOL_FEE", uint256(3000))),
+            currency0:   c0,
+            currency1:   c1,
+            fee:         uint24(vm.envOr("POOL_FEE",     uint256(3000))),
             tickSpacing: int24(int256(vm.envOr("TICK_SPACING", uint256(60)))),
-            hooks: IHooks(hook)
+            hooks:       IHooks(address(hook))
         });
 
         int24 targetTick = int24(int256(vm.envOr("TARGET_TICK", uint256(78240))));
-        targetTick = truncateTickSpacing(targetTick, key.tickSpacing);
+        targetTick = _truncateTick(targetTick, key.tickSpacing);
         uint160 sqrtPriceX96 = TickMath.getSqrtPriceAtTick(targetTick);
 
-        // If the pool is already initialized, Slot0 sqrtPriceX96 will be non-zero.
         (uint160 sqrt0,,,) = StateLibrary.getSlot0(poolManager, key.toId());
         if (sqrt0 == 0) {
             int24 initialTick = poolManager.initialize(key, sqrtPriceX96);
-            console.log("Pool Initialized");
-            console.log("Initial tick:", initialTick);
+            console.log("Pool initialized. Initial tick:", initialTick);
         } else {
             console.log("Pool already initialized, skipping initialize()");
         }
 
-        // Switch broadcast to the MPPI LP owner for approvals and initial LP mint.
         vm.stopBroadcast();
 
-        // 5) Approvals & Add Liquidity (from MPPI LP owner)
+        // ── 5) Approvals + initial LP position (MPPI LP owner key) ───────────
         vm.startBroadcast(mppiPk);
 
-        // 5.1) Approvals (ERC20 + Permit2) for MPPI owner
-        token0.approve(address(permit2), type(uint256).max);
-        token1.approve(address(permit2), type(uint256).max);
+        token0.approve(address(permit2),         type(uint256).max);
+        token1.approve(address(permit2),         type(uint256).max);
         token0.approve(address(positionManager), type(uint256).max);
         token1.approve(address(positionManager), type(uint256).max);
-        token0.approve(address(swapRouter), type(uint256).max);
-        token1.approve(address(swapRouter), type(uint256).max);
+        token0.approve(SWAP_ROUTER,              type(uint256).max);
+        token1.approve(SWAP_ROUTER,              type(uint256).max);
 
-        // Permit2 approvals (best-effort)
-        try permit2.approve(address(token0), address(positionManager), type(uint160).max, type(uint48).max) {
-            console.log("Permit2 approval: token0 -> positionManager");
-        } catch {
-            console.log("Permit2 approval skipped: token0 -> positionManager");
+        _tryPermit2(permit2, address(token0), address(positionManager), "token0 -> positionManager");
+        _tryPermit2(permit2, address(token1), address(positionManager), "token1 -> positionManager");
+        _tryPermit2(permit2, address(token0), SWAP_ROUTER,              "token0 -> swapRouter");
+        _tryPermit2(permit2, address(token1), SWAP_ROUTER,              "token1 -> swapRouter");
+
+        {
+            int24 halfWidth = int24(int256(vm.envOr("RANGE_HALF_WIDTH_TICKS", uint256(2000))));
+            int24 tickLower = _truncateTick(targetTick - halfWidth, key.tickSpacing);
+            int24 tickUpper = _truncateTick(targetTick + halfWidth, key.tickSpacing);
+            uint128 liquidity = uint128(vm.envOr("INITIAL_LIQUIDITY", uint256(1000e18)));
+
+            (uint160 sqrtNow,,,) = StateLibrary.getSlot0(poolManager, key.toId());
+            console.log("Slot0 sqrtPriceX96:", sqrtNow);
+            console.log("Calculated price (token1/token0):", FullMath.mulDiv(sqrtNow, sqrtNow, 2**192));
+
+            (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
+                sqrtNow,
+                TickMath.getSqrtPriceAtTick(tickLower),
+                TickMath.getSqrtPriceAtTick(tickUpper),
+                liquidity
+            );
+
+            (bytes memory actions, bytes[] memory mintParams) = _mintParams(
+                key, tickLower, tickUpper, liquidity,
+                amount0Expected + 1, amount1Expected + 1, mppiAddr
+            );
+            positionManager.modifyLiquidities(abi.encode(actions, mintParams), block.timestamp + 3600);
+            console.log("Liquidity added");
         }
-        try permit2.approve(address(token1), address(positionManager), type(uint160).max, type(uint48).max) {
-            console.log("Permit2 approval: token1 -> positionManager");
-        } catch {
-            console.log("Permit2 approval skipped: token1 -> positionManager");
-        }
-        try permit2.approve(address(token0), address(swapRouter), type(uint160).max, type(uint48).max) {
-            console.log("Permit2 approval: token0 -> swapRouter");
-        } catch {
-            console.log("Permit2 approval skipped: token0 -> swapRouter");
-        }
-        try permit2.approve(address(token1), address(swapRouter), type(uint160).max, type(uint48).max) {
-            console.log("Permit2 approval: token1 -> swapRouter");
-        } catch {
-            console.log("Permit2 approval skipped: token1 -> swapRouter");
-        }
-
-        // 5.2) Add Liquidity
-        int24 tickLower = truncateTickSpacing(targetTick - int24(int256(vm.envOr("RANGE_HALF_WIDTH_TICKS", uint256(2000)))), key.tickSpacing);
-        int24 tickUpper = truncateTickSpacing(targetTick + int24(int256(vm.envOr("RANGE_HALF_WIDTH_TICKS", uint256(2000)))), key.tickSpacing);
-
-        uint128 liquidity = uint128(vm.envOr("INITIAL_LIQUIDITY", uint256(1000e18)));
-
-        (uint160 sqrtNow,,,) = StateLibrary.getSlot0(poolManager, key.toId());
-        uint256 priceNow = FullMath.mulDiv(sqrtNow, sqrtNow, 2**192);
-        console.log("Slot0 sqrtPriceX96:", sqrtNow);
-        console.log("Calculated price (token1/token0):", priceNow);
-
-        (uint256 amount0Expected, uint256 amount1Expected) = LiquidityAmounts.getAmountsForLiquidity(
-            sqrtNow,
-            TickMath.getSqrtPriceAtTick(tickLower),
-            TickMath.getSqrtPriceAtTick(tickUpper),
-            liquidity
-        );
-
-        bytes memory hookData = "";
-        (bytes memory actions, bytes[] memory mintParams) = _mintLiquidityParams(
-            key,
-            tickLower,
-            tickUpper,
-            liquidity,
-            amount0Expected + 1,
-            amount1Expected + 1,
-            mppiAddr,
-            hookData
-        );
-        positionManager.modifyLiquidities(abi.encode(actions, mintParams), block.timestamp + 3600);
-        console.log("Liquidity Added");
 
         vm.stopBroadcast();
 
-        // 6) Write address config
-        // Write a chain-specific file to avoid clobbering local Anvil config.
+        // ── 6) Write address config ───────────────────────────────────────────
+        _writeAddresses(address(token0), address(token1), address(hook), address(oracle));
+    }
+
+    // =========================================================================
+    // Helper: pre-mine the hook salt without broadcasting.
+    // Usage: forge script script/BaseSepoliaRun.s.sol --sig "mineSalt()" --rpc-url <url>
+    // Copy the logged salt value and set HOOK_SALT=<value> in .env.
+    // =========================================================================
+    function mineSalt() external view {
+        uint256 deployerPk = vm.envUint("PRIVATE_KEY");
+        address poolManager = POOL_MANAGER;
+        bytes memory constructorArgs = abi.encode(poolManager);
+        uint160 flags = uint160(
+            Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG
+                | Hooks.BEFORE_ADD_LIQUIDITY_FLAG | Hooks.BEFORE_REMOVE_LIQUIDITY_FLAG
+        );
+        (address hookAddress, bytes32 salt) = HookMiner.find(
+            CREATE2_FACTORY, flags, type(Counter).creationCode, constructorArgs
+        );
+        console.log("Found salt (set HOOK_SALT=<value> in .env):");
+        console.log("  HOOK_SALT:", uint256(salt));
+        console.log("  Hook address:", hookAddress);
+        console.log("  Deployer key used:", vm.addr(deployerPk));
+    }
+
+    // =========================================================================
+    // Internal helpers (inlined from LiquidityHelpers to avoid Deployers import)
+    // =========================================================================
+
+    function _truncateTick(int24 tick, int24 spacing) internal pure returns (int24) {
+        /// forge-lint: disable-next-line(divide-before-multiply)
+        return (tick / spacing) * spacing;
+    }
+
+    function _mintParams(
+        PoolKey memory poolKey,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 liquidity,
+        uint256 amount0Max,
+        uint256 amount1Max,
+        address recipient
+    ) internal pure returns (bytes memory actions, bytes[] memory params) {
+        actions = abi.encodePacked(
+            uint8(Actions.MINT_POSITION),
+            uint8(Actions.SETTLE_PAIR),
+            uint8(Actions.SWEEP),
+            uint8(Actions.SWEEP)
+        );
+        params = new bytes[](4);
+        params[0] = abi.encode(poolKey, tickLower, tickUpper, liquidity, amount0Max, amount1Max, recipient, bytes(""));
+        params[1] = abi.encode(poolKey.currency0, poolKey.currency1);
+        params[2] = abi.encode(poolKey.currency0, recipient);
+        params[3] = abi.encode(poolKey.currency1, recipient);
+    }
+
+    function _tryPermit2(IPermit2 permit2, address token, address spender, string memory label) internal {
+        try permit2.approve(token, spender, type(uint160).max, type(uint48).max) {
+            console.log("Permit2 approval:", label);
+        } catch {
+            console.log("Permit2 approval skipped:", label);
+        }
+    }
+
+    function _writeAddresses(address token0, address token1, address hook, address oracle) internal {
         string memory json = "{\"pool_manager\": \"";
-        json = string.concat(json, vm.toString(address(poolManager)));
+        json = string.concat(json, vm.toString(POOL_MANAGER));
         json = string.concat(json, "\", \"position_manager\": \"");
-        json = string.concat(json, vm.toString(address(positionManager)));
+        json = string.concat(json, vm.toString(POSITION_MANAGER));
         json = string.concat(json, "\", \"permit2\": \"");
-        json = string.concat(json, vm.toString(address(permit2)));
+        json = string.concat(json, vm.toString(PERMIT2));
         json = string.concat(json, "\", \"swap_router\": \"");
-        json = string.concat(json, vm.toString(address(swapRouter)));
+        json = string.concat(json, vm.toString(SWAP_ROUTER));
         json = string.concat(json, "\", \"token0\": \"");
-        json = string.concat(json, vm.toString(address(token0)));
+        json = string.concat(json, vm.toString(token0));
         json = string.concat(json, "\", \"token1\": \"");
-        json = string.concat(json, vm.toString(address(token1)));
+        json = string.concat(json, vm.toString(token1));
         json = string.concat(json, "\", \"hook\": \"");
-        json = string.concat(json, vm.toString(address(hook)));
+        json = string.concat(json, vm.toString(hook));
         json = string.concat(json, "\", \"oracle\": \"");
-        json = string.concat(json, vm.toString(address(oracle)));
+        json = string.concat(json, vm.toString(oracle));
         json = string.concat(json, "\"}");
 
         string memory outPath = string.concat("broadcast/addresses.", vm.toString(block.chainid), ".json");
         vm.writeFile(outPath, json);
         console.log("Wrote addresses to:", outPath);
 
-        // Optional: also write to broadcast/addresses.json for dashboard compatibility
-        bool writeLatest = vm.envOr("WRITE_ADDRESSES_LATEST", false);
-        if (writeLatest) {
+        if (vm.envOr("WRITE_ADDRESSES_LATEST", false)) {
             vm.writeFile("broadcast/addresses.json", json);
-            console.log("Also wrote addresses to: broadcast/addresses.json");
+            console.log("Also wrote to: broadcast/addresses.json");
         }
     }
 }
-

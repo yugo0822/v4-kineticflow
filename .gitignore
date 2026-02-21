@@ -19,3 +19,6 @@ node_modules/
 .DS_Store
 
 anvil.log
+
+# Environment variables
+.env
