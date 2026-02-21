@@ -40,7 +40,7 @@ run:
 		--name $(CONTAINER_NAME) \
 		--add-host host.docker.internal:host-gateway \
 		-p 8501:8501 \
-		--env-file .env \ 
+		--env-file .env \
 		-v $(PWD)/broadcast:/app/broadcast \
 		-e ANVIL_RPC_URL="http://host.docker.internal:8545" \
 		$(IMAGE_NAME)

@@ -1,20 +1,23 @@
 import os
 import time
-import random
 
 from web3 import Web3
 from dotenv import load_dotenv
 
 from dashboard.chain.client import get_rpc_url
-from dashboard.chain.abis import POOL_MANAGER_ABI, POSITION_MANAGER_ABI, ORACLE_ABI
+from dashboard.chain.abis import POOL_MANAGER_ABI, POSITION_MANAGER_ABI
 from dashboard.chain.pool import fetch_slot0, fetch_liquidity, find_active_position, compute_pool_id
 from dashboard.config import CONTRACTS
+from dashboard.price.base import ExternalPriceProvider
+from dashboard.price import create_price_provider
 
 load_dotenv()
 
+_PRICE_SYMBOL = os.getenv("PRICE_SYMBOL", "ETHUSDT")
+
 
 class MarketMonitor:
-    def __init__(self):
+    def __init__(self, price_provider: ExternalPriceProvider | None = None):
         self.rpc_url = get_rpc_url()
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 
@@ -31,6 +34,10 @@ class MarketMonitor:
             )
         else:
             self.position_manager = None
+
+        # ExternalPriceProvider: injected or created from PRICE_PROVIDER env var
+        self.price_provider: ExternalPriceProvider = price_provider or create_price_provider()
+        print(f"Monitor: Using price provider [{self.price_provider.name}]", flush=True)
 
         self.history = []
 
@@ -60,22 +67,12 @@ class MarketMonitor:
         _, tick_lower, tick_upper = find_active_position(self.position_manager, pool_id_bytes)
         return tick_lower, tick_upper
 
-    def fetch_mock_oracle_price(self) -> float | None:
-        """Fetch price from MockV3Aggregator oracle."""
+    def fetch_external_price(self) -> float | None:
+        """Fetch external market price via the configured ExternalPriceProvider."""
         try:
-            oracle_address = CONTRACTS.get("oracle")
-            if not oracle_address:
-                return None
-
-            oracle = self.w3.eth.contract(
-                address=self.w3.to_checksum_address(oracle_address),
-                abi=ORACLE_ABI,
-            )
-            _, answer, _, _, _ = oracle.functions.latestRoundData().call()
-            decimals = oracle.functions.decimals().call()
-            return float(answer) / (10**decimals)
+            return self.price_provider.get_price(_PRICE_SYMBOL)
         except Exception as e:
-            print(f"Error fetching mock oracle price: {e}", flush=True)
+            print(f"[{self.price_provider.name}] Price fetch failed: {e}", flush=True)
             return None
 
     # ------------------------------------------------------------------
@@ -89,17 +86,29 @@ class MarketMonitor:
 
         last_valid_price = None
         last_valid_tick = None
+        last_valid_external_price = None
 
         while True:
             onchain = self.fetch_onchain_price(pool_id)
-            external_price = self.fetch_mock_oracle_price()
+            external_price = self.fetch_external_price()
 
             if external_price is None:
-                current_pool_price = (
-                    onchain["price"] if onchain and onchain.get("price", 0) > 0 else (last_valid_price or 2500)
-                )
-                external_price = current_pool_price + random.uniform(-10, 10)
-                print("Warning: Using fallback dummy price (oracle unavailable)", flush=True)
+                if last_valid_external_price is not None:
+                    external_price = last_valid_external_price
+                    print(
+                        f"[{self.price_provider.name}] Using last known price: {external_price:.4f}",
+                        flush=True,
+                    )
+                else:
+                    current_pool_price = (
+                        onchain["price"]
+                        if onchain and onchain.get("price", 0) > 0
+                        else (last_valid_price or 2500)
+                    )
+                    external_price = current_pool_price
+                    print("Warning: No external price available. Falling back to pool price.", flush=True)
+            else:
+                last_valid_external_price = external_price
 
             if onchain and onchain.get("price", 0) > 0:
                 # Resolve pool_id to bytes for comparison

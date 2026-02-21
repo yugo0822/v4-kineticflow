@@ -22,60 +22,29 @@ st_autorefresh(interval=1000, key="data_refresh")
 # st.title("📊Dynamic Range Optimizer")
 # st.markdown("v4 Dynamic Liquidity Management Dashboard")
 
-@st.cache_data(ttl=2)
-def fetch_live_external_price():
-    """Fetch real-time price from MockV3Aggregator"""
+@st.cache_data(ttl=5)
+def fetch_live_external_price() -> float | None:
+    """Fetch real-time external price via the configured ExternalPriceProvider.
+
+    Cached for 5 seconds to avoid hammering the API on rapid re-renders.
+    Falls back to the latest value stored in SQLite by market_monitor.
+    """
     try:
-        from web3 import Web3
-        from config import CONTRACTS
-        
-        # RPC priority: Base Sepolia > generic RPC_URL > Anvil local
-        rpc_url = (
-            os.getenv("BASE_SEPOLIA_RPC_URL")
-            or os.getenv("RPC_URL")
-            or os.getenv("ANVIL_RPC_URL")
-            or "http://127.0.0.1:8545"
-        )
-        w3 = Web3(Web3.HTTPProvider(rpc_url))
-        
-        oracle_address = CONTRACTS.get('oracle')
-        if not oracle_address:
-            return None
-        
-        oracle_abi = [
-            {
-                "inputs": [],
-                "name": "latestRoundData",
-                "outputs": [
-                    {"internalType": "uint80", "name": "roundId", "type": "uint80"},
-                    {"internalType": "int256", "name": "answer", "type": "int256"},
-                    {"internalType": "uint256", "name": "startedAt", "type": "uint256"},
-                    {"internalType": "uint256", "name": "updatedAt", "type": "uint256"},
-                    {"internalType": "uint80", "name": "answeredInRound", "type": "uint80"}
-                ],
-                "stateMutability": "view",
-                "type": "function"
-            },
-            {
-                "inputs": [],
-                "name": "decimals",
-                "outputs": [{"internalType": "uint8", "name": "", "type": "uint8"}],
-                "stateMutability": "view",
-                "type": "function"
-            }
-        ]
-        
-        oracle = w3.eth.contract(
-            address=w3.to_checksum_address(oracle_address),
-            abi=oracle_abi
-        )
-        
-        round_id, answer, started_at, updated_at, answered_in_round = oracle.functions.latestRoundData().call()
-        decimals = oracle.functions.decimals().call()
-        price = float(answer) / (10 ** decimals)
-        
-        return price
-    except Exception as e:
+        from dashboard.price import create_price_provider
+        symbol = os.getenv("PRICE_SYMBOL", "ETHUSDT")
+        return create_price_provider().get_price(symbol)
+    except Exception:
+        pass
+
+    # Fallback: use the last recorded external_price from the DB
+    try:
+        import sqlite3
+        with sqlite3.connect(store.db_path) as conn:
+            row = conn.execute(
+                "SELECT external_price FROM price_history ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        return float(row[0]) if row else None
+    except Exception:
         return None
 
 def load_data(limit=20):
